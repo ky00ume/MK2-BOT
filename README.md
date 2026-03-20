@@ -132,6 +132,7 @@
 | 파일 | 설명 |
 |------|------|
 | `MikuNiceTry_CharCard.json` | RISUAI V3 JSON 캐릭터 카드 (LUA 트리거 스크립트 내장) |
+| `uno_engine.lua` | LUA 게임 엔진 소스 (참조/개발용 — JSON 내 `script` 필드와 동일한 코드) |
 | `regex_script_uno_ui.md` | 기술 구조 및 변경 이력 문서 |
 | `README.md` | 이 파일 |
 

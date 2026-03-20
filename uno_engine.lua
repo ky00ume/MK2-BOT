@@ -814,6 +814,10 @@ end
 
 -- ========== DISPLAY HOOK ==========
 listenEdit("editDisplay", function(triggerId, data)
+  data = data:gsub("{AFF|[^}]*}", "")
+  data = data:gsub("{SIG|[^}]*}", "")
+  data = data:gsub("{null}", "")
+  data = data:gsub("{%u[%u_]*|[^}]*}", "")
   local g = loadG(triggerId)
   if not g.active then
     -- Show game-over panel if series ended

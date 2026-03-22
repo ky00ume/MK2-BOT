@@ -191,6 +191,7 @@ local function saveG(tid, g)
   setState(tid,"uno",   g.uno   and "1" or "0")
   setState(tid,"stk",   tostring(g.stk))
   setState(tid,"said",  g.said)
+  setState(tid,"winner",g.winner or "") -- PATCH: persist winner so stale values don't leak across games
 end
 
 -- ========== DRAW ==========
@@ -814,32 +815,39 @@ end
 
 -- ========== DISPLAY HOOK ==========
 listenEdit("editDisplay", function(triggerId, data)
-  data = data:gsub("{AFF|[^}]*}", "")
-  data = data:gsub("{SIG|[^}]*}", "")
-  data = data:gsub("{null}", "")
-  data = data:gsub("{%u[%u_]*|[^}]*}", "")
-  local g = loadG(triggerId)
-  if not g.active then
-    -- Show game-over panel if series ended
-    if g.winner ~= "" then
-      local wonBy = g.winner == "miku" and "🎤 미쿠 승리" or "🏆 유저 승리"
-      local msg = g.winner == "miku"
-        and "벌칙을 수행하세요 ♡"
-        or "미쿠가 벌칙을 수행합니다 ♡"
-      local over = string.format(
-        '<div style="font-family:sans-serif;background:linear-gradient(160deg,#0f0c29,#1a1a4e);border-radius:14px;padding:16px;color:#fff;max-width:500px;margin:8px auto;text-align:center;border:2px solid rgba(255,255,255,.15)">'..
-        '<div style="font-size:1.4em;font-weight:900;margin-bottom:8px">%s</div>'..
-        '<div style="font-size:.9em;color:#c0c8e8;margin-bottom:6px">미쿠 %d : %d 유저</div>'..
-        '<div style="font-size:.85em;margin-bottom:8px">😆 미쿠: %s</div>'..
-        '<div style="font-size:.75em;color:#e91e8c;font-weight:bold">%s</div>'..
-        '<div style="font-size:.65em;color:#3a4070;margin-top:8px;font-style:italic">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>',
-        wonBy, g.ms, g.us, g.said, msg
-      )
-      return data .. "\n\n" .. over
+  -- PATCH: guard against non-string data (RisuAI may pass json-decoded value)
+  data = tostring(data or "")
+  -- PATCH: wrap callback body in pcall for graceful degradation on any error
+  local ok, result = pcall(function()
+    data = data:gsub("{AFF|[^}]*}", "")
+    data = data:gsub("{SIG|[^}]*}", "")
+    data = data:gsub("{null}", "")
+    data = data:gsub("{%u[%u_]*|[^}]*}", "") -- PATCH: broad pattern covers {BAT|..}, {FLOOR|..}, etc.
+    local g = loadG(triggerId)
+    if not g.active then
+      -- Show game-over panel if series ended
+      if g.winner ~= "" then
+        local wonBy = g.winner == "miku" and "🎤 미쿠 승리" or "🏆 유저 승리"
+        local msg = g.winner == "miku"
+          and "벌칙을 수행하세요 ♡"
+          or "미쿠가 벌칙을 수행합니다 ♡"
+        local over = string.format(
+          '<div style="font-family:sans-serif;background:linear-gradient(160deg,#0f0c29,#1a1a4e);border-radius:14px;padding:16px;color:#fff;max-width:500px;margin:8px auto;text-align:center;border:2px solid rgba(255,255,255,.15)">'..
+          '<div style="font-size:1.4em;font-weight:900;margin-bottom:8px">%s</div>'..
+          '<div style="font-size:.9em;color:#c0c8e8;margin-bottom:6px">미쿠 %d : %d 유저</div>'..
+          '<div style="font-size:.85em;margin-bottom:8px">😆 미쿠: %s</div>'..
+          '<div style="font-size:.75em;color:#e91e8c;font-weight:bold">%s</div>'..
+          '<div style="font-size:.65em;color:#3a4070;margin-top:8px;font-style:italic">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>',
+          wonBy, g.ms, g.us, g.said, msg
+        )
+        return data .. "\n\n" .. over
+      end
+      return data
     end
-    return data
-  end
-  local ui = buildUI(g)
-  return data .. "\n\n" .. ui
+    local ui = buildUI(g)
+    return data .. "\n\n" .. ui
+  end)
+  -- PATCH: on error, return original data so text still displays
+  if ok then return result else return data end
 end)
 

@@ -456,45 +456,50 @@ local function cardCls(c)
 end
 
 -- ========== HTML UI BUILDER ==========
+-- FIX7: All CSS class names prefixed with x-risu- to match DOMPurify's automatic
+-- class-name prefixing (parser.svelte.ts prefixes every class with "x-risu-").
 local CSS = [[<style>
-.uu{font-family:'Segoe UI',sans-serif;background:linear-gradient(160deg,#0f0c29,#1a1a4e,#16213e);border-radius:14px;padding:12px 14px;color:#fff;max-width:500px;margin:8px auto;box-shadow:0 6px 24px rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.07)}
-.uscr{text-align:center;padding:4px 8px;background:rgba(255,255,255,.06);border-radius:8px;font-size:.78em;color:#c0c8e8;margin-bottom:7px;border:1px solid rgba(255,255,255,.07)}
-.ubdg{display:inline-block;padding:1px 8px;border-radius:12px;font-size:.7em;font-weight:700;vertical-align:middle}
-.ubdg.m{background:#e91e8c;color:#fff}.ubdg.u{background:#00bcd4;color:#111}
-.ubbl{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.13);border-radius:9px;padding:7px 12px;margin-bottom:7px;font-size:.88em;line-height:1.5}
-.ulbl{font-size:.7em;color:#6870a0;margin:5px 0 2px;text-transform:uppercase;letter-spacing:.06em}
-.uhnd{display:flex;flex-wrap:wrap;gap:3px;padding:5px;background:rgba(0,0,0,.18);border-radius:9px;min-height:54px;align-items:center}
-.uc{display:inline-flex;align-items:center;justify-content:center;width:34px;height:50px;border-radius:5px;font-weight:900;font-size:.8em;box-shadow:2px 3px 6px rgba(0,0,0,.45);border:2px solid rgba(255,255,255,.18);cursor:default;user-select:none;text-align:center}
-.uc.r{background:#d32f2f;color:#fff}.uc.b{background:#1565c0;color:#fff}.uc.g{background:#2e7d32;color:#fff}.uc.y{background:#f9a825;color:#111}
-.uc.w{background:linear-gradient(135deg,#d32f2f 0%,#f9a825 33%,#2e7d32 66%,#1565c0 100%);color:#fff}
-.uc.bk{background:linear-gradient(135deg,#181848,#2a2a6e);color:#889;font-size:.6em}
-.umid{display:flex;gap:8px;align-items:center;margin:5px 0;padding:7px;background:rgba(255,255,255,.03);border-radius:9px;border:1px solid rgba(255,255,255,.05)}
-.ustk{text-align:center;font-size:.72em;color:#ff7070;margin-top:3px;padding:3px;background:rgba(255,80,80,.08);border-radius:5px}
-.uft{text-align:center;font-size:.67em;color:#3a4070;margin-top:5px;font-style:italic}
+.x-risu-uu{font-family:'Segoe UI',sans-serif;background:linear-gradient(160deg,#0f0c29,#1a1a4e,#16213e);border-radius:14px;padding:12px 14px;color:#fff;max-width:500px;margin:8px auto;box-shadow:0 6px 24px rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.07)}
+.x-risu-uscr{text-align:center;padding:4px 8px;background:rgba(255,255,255,.06);border-radius:8px;font-size:.78em;color:#c0c8e8;margin-bottom:7px;border:1px solid rgba(255,255,255,.07)}
+.x-risu-ubdg{display:inline-block;padding:1px 8px;border-radius:12px;font-size:.7em;font-weight:700;vertical-align:middle}
+.x-risu-ubdg.x-risu-m{background:#e91e8c;color:#fff}.x-risu-ubdg.x-risu-u{background:#00bcd4;color:#111}
+.x-risu-ubbl{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.13);border-radius:9px;padding:7px 12px;margin-bottom:7px;font-size:.88em;line-height:1.5}
+.x-risu-ulbl{font-size:.7em;color:#6870a0;margin:5px 0 2px;text-transform:uppercase;letter-spacing:.06em}
+.x-risu-uhnd{display:flex;flex-wrap:wrap;gap:3px;padding:5px;background:rgba(0,0,0,.18);border-radius:9px;min-height:54px;align-items:center}
+.x-risu-uc{display:inline-flex;align-items:center;justify-content:center;width:34px;height:50px;border-radius:5px;font-weight:900;font-size:.8em;box-shadow:2px 3px 6px rgba(0,0,0,.45);border:2px solid rgba(255,255,255,.18);cursor:default;user-select:none;text-align:center;padding:0;background:none}
+.x-risu-uc.x-risu-r{background:#d32f2f;color:#fff}.x-risu-uc.x-risu-b{background:#1565c0;color:#fff}.x-risu-uc.x-risu-g{background:#2e7d32;color:#fff}.x-risu-uc.x-risu-y{background:#f9a825;color:#111}
+.x-risu-uc.x-risu-w{background:linear-gradient(135deg,#d32f2f 0%,#f9a825 33%,#2e7d32 66%,#1565c0 100%);color:#fff}
+.x-risu-uc.x-risu-bk{background:linear-gradient(135deg,#181848,#2a2a6e);color:#889;font-size:.6em}
+.x-risu-umid{display:flex;gap:8px;align-items:center;margin:5px 0;padding:7px;background:rgba(255,255,255,.03);border-radius:9px;border:1px solid rgba(255,255,255,.05)}
+.x-risu-ustk{text-align:center;font-size:.72em;color:#ff7070;margin-top:3px;padding:3px;background:rgba(255,80,80,.08);border-radius:5px}
+.x-risu-uft{text-align:center;font-size:.67em;color:#3a4070;margin-top:5px;font-style:italic}
+.x-risu-ubtn{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:6px;color:#fff;padding:4px 10px;cursor:pointer;font-size:.78em;font-weight:700;margin:2px}
 </style>]]
 
 local function buildUI(g)
   local h = {CSS}
   local isMiku = (g.turn == "miku")
+-- FIX7: x-risu- prefix on class names to match DOMPurify's auto-prefixing.
+-- padding:0;background:none on x-risu-uc resets browser UA defaults for <button> elements.
   local badge  = isMiku
-    and '<span class="ubdg m">미쿠 턴</span>'
-    or  '<span class="ubdg u">내 턴</span>'
+    and '<span class="x-risu-ubdg x-risu-m">미쿠 턴</span>'
+    or  '<span class="x-risu-ubdg x-risu-u">내 턴</span>'
 
   local cdot = ({Red="🔴",Blue="🔵",Green="🟢",Yellow="🟡"})[g.col] or ""
 
   -- Score / status bar
   table.insert(h, string.format(
-    '<div class="uu"><div class="uscr">🃏 미쿠 <b>%d</b> : <b>%d</b> 유저 &nbsp;|&nbsp; Round %d &nbsp;|&nbsp; %s &nbsp;|&nbsp; %s %s</div>',
+    '<div class="x-risu-uu"><div class="x-risu-uscr">🃏 미쿠 <b>%d</b> : <b>%d</b> 유저 &nbsp;|&nbsp; Round %d &nbsp;|&nbsp; %s &nbsp;|&nbsp; %s %s</div>',
     g.ms, g.us, g.rnd, badge, cdot, g.col
   ))
 
   -- Miku speech bubble
-  table.insert(h, string.format('<div class="ubbl">😆 <b>미쿠:</b> %s</div>', g.said))
+  table.insert(h, string.format('<div class="x-risu-ubbl">😆 <b>미쿠:</b> %s</div>', g.said))
 
   -- Miku hand (face-down)
-  table.insert(h, '<div class="ulbl">미쿠 패</div><div class="uhnd">')
+  table.insert(h, '<div class="x-risu-ulbl">미쿠 패</div><div class="x-risu-uhnd">')
   for i = 1, #g.mh do
-    table.insert(h, '<span class="uc bk">UNO</span>')
+    table.insert(h, '<span class="x-risu-uc x-risu-bk">UNO</span>')
   end
   table.insert(h, string.format(
     '<small style="color:#909;margin-left:4px">%d장</small></div>', #g.mh
@@ -504,12 +509,13 @@ local function buildUI(g)
   local topLbl = cardLabel(g.top)
   local topCls = cardCls(g.top)
   table.insert(h, string.format(
-    '<div class="umid"><span style="font-size:.68em;color:#6870a0">버린 카드</span> <span class="uc %s">%s</span><div style="flex:1"></div>',
+    '<div class="x-risu-umid"><span style="font-size:.68em;color:#6870a0">버린 카드</span> <span class="x-risu-uc x-risu-%s">%s</span><div style="flex:1"></div>',
     topCls, topLbl
   ))
   if not isMiku then
+    -- FIX7: raw risu-btn attribute routes click through runLuaButtonTrigger → onButtonClick
     table.insert(h, string.format(
-      '{{button::🂠 뽑기(%d장)::drawCard}}', #g.deck
+      '<button class="x-risu-ubtn" risu-btn="drawCard">🂠 뽑기(%d장)</button>', #g.deck
     ))
   else
     table.insert(h, string.format(
@@ -520,7 +526,7 @@ local function buildUI(g)
 
   -- User hand
   table.insert(h, string.format(
-    '<div class="ulbl">내 패 (%d장)</div><div class="uhnd">',
+    '<div class="x-risu-ulbl">내 패 (%d장)</div><div class="x-risu-uhnd">',
     #g.uh
   ))
   if not isMiku then
@@ -531,13 +537,14 @@ local function buildUI(g)
         and (g.stk == 0 or isDraw(c))
         and not (#g.uh == 1 and isAction(c))
       if playable then
+        -- FIX7: button styled as a card; risu-btn dispatches to onButtonClick
         table.insert(h, string.format(
-          '{{button::<span class="uc %s">%s</span>::playCard_%d}}',
-          cls, lbl, i-1
+          '<button class="x-risu-uc x-risu-%s" risu-btn="playCard_%d" style="cursor:pointer">%s</button>',
+          cls, i-1, lbl
         ))
       else
         table.insert(h, string.format(
-          '<span class="uc %s" style="opacity:.3">%s</span>', cls, lbl
+          '<span class="x-risu-uc x-risu-%s" style="opacity:.3">%s</span>', cls, lbl
         ))
       end
     end
@@ -548,18 +555,19 @@ local function buildUI(g)
 
   -- UNO declaration button
   if not isMiku and #g.uh == 1 and not g.uno then
-    table.insert(h, '<br>{{button::🎴 UNO!::declareUno}}')
+    -- FIX7: risu-btn for Lua dispatch
+    table.insert(h, '<br><button class="x-risu-ubtn" risu-btn="declareUno">🎴 UNO!</button>')
   end
 
   -- Draw stack warning
   if g.stk > 0 then
     table.insert(h, string.format(
-      '<div class="ustk">⚠️ 드로우 스택 <b>+%d</b> — 드로우 카드로 맞받거나 뽑기!</div>',
+      '<div class="x-risu-ustk">⚠️ 드로우 스택 <b>+%d</b> — 드로우 카드로 맞받거나 뽑기!</div>',
       g.stk
     ))
   end
 
-  table.insert(h, '<div class="uft">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>')
+  table.insert(h, '<div class="x-risu-uft">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>')
   return table.concat(h)
 end
 
@@ -832,6 +840,22 @@ for _i = 0, 19 do
   end
 end
 
+-- ========== onButtonClick (FIX7: single router called by RisuAI for all risu-btn clicks) ==========
+-- RisuAI calls onButtonClick(triggerId, buttonName) when a risu-btn element is clicked.
+-- Unknown button names are silently ignored (no alert) to avoid disrupting gameplay.
+function onButtonClick(triggerId, btnName)
+  if btnName == "drawCard" then
+    drawCard(triggerId)
+  elseif btnName == "declareUno" then
+    declareUno(triggerId)
+  else
+    local idx = btnName:match("^playCard_(%d+)$")
+    if idx then
+      doPlay(triggerId, tonumber(idx))
+    end
+  end
+end
+
 -- ========== DISPLAY HOOK ==========
 listenEdit("editDisplay", function(triggerId, data)
   -- PATCH: guard against non-string data (RisuAI may pass json-decoded value)
@@ -866,7 +890,7 @@ listenEdit("editDisplay", function(triggerId, data)
     local ui = buildUI(g)
     return data .. "\n\n" .. ui
   end)
-  -- PATCH: on error, return original data so text still displays
-  if ok then return result else return data end
+  -- FIX7: on error, include error message as HTML comment for debugging
+  if ok then return result else return data .. "<!-- LUA_ERR: " .. tostring(result) .. " -->" end
 end)
 

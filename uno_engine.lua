@@ -56,6 +56,17 @@ local D = {
     "어?! 뭔가 이상하게 섞혔는데...? 어...어...어...?! 패가 1장?! 이건 내가 이기는 거잖아♡",
     "잠깐 이게 무슨... 패가 고작 1장?? 에이 이건 내가 이기는 거 아니야?♡ 너 포기해~♡"
   },
+  -- FIX8: 특수 이벤트 기고만장 대사
+  event_smug = {
+    "어?! 패가 1장?! 이건 내가 이기는 거잖아♡ 네 패는... 13장?! HAHAHA♡♡♡",
+    "잠깐 이게 무슨... 패가 고작 1장?? 이건 운명이야♡ 포기해~♡ HAHAHA♡"
+  },
+  -- FIX8: 특수 이벤트 미쿠 붕괴 대사
+  event_collapse = {
+    "...으아아아앙앙... 이, 이게 무슨... 말도 안... 돼......",
+    "어?! 어어?! 어어어어?!?! ...으아아아아아앙앙~!!!!!! 이건 뭐야!!!!",
+    "하...하하...하하하... ...으아아아아아앙앙앙앙~!!!! 거짓말이지?! 거짓말이라고 해!!!!!"
+  },
   normal = {
     "어서 카드 내봐♡",
     "고민하지 말고 빨리♡",
@@ -366,7 +377,9 @@ local function initRound(tid, g)
       table.insert(g.uh, table.remove(deck))
     end
     setState(tid, "special", "1")
-    g.said = pick("event")
+    local smugLine = pick("event_smug")
+    setState(tid, "ev_smug", smugLine) -- saved for buildSpecialEventUI to replay consistently
+    g.said = smugLine                  -- used in AI context message via setInput
   else
     g.mh = {}
     g.uh = {}
@@ -394,6 +407,52 @@ local function initRound(tid, g)
   g.uno   = false
   g.active= true
   return special
+end
+
+-- ========== FIX8: 1% 특수 이벤트 자동 처리 ==========
+local function autoPlaySpecialEvent(tid, g)
+  -- FIX8: 특수 이벤트 자동 처리 — 유저 드로우 카드 연쇄 → 미쿠 대량 드로우 → 유저 Green8 피니시
+  -- 원래 유저 패(13장)와 미쿠 패(1장)를 state에 저장 (UI 표시용)
+  setState(tid, "ev_cards", ser(g.uh))
+  setState(tid, "ev_miku_card", ser(g.mh))
+
+  local totalDrawn = 0
+  -- 드로우 카드들 먼저 처리 (Green8 제외한 12장)
+  while #g.uh > 1 do
+    local foundDraw = nil
+    for i, c in ipairs(g.uh) do
+      if isDraw(c) then foundDraw = i; break end
+    end
+    if not foundDraw then break end
+    local c = table.remove(g.uh, foundDraw)
+    g.top = c
+    g.col = cardColor(c)
+    if g.col == "Wild" then g.col = "Green" end
+    totalDrawn = totalDrawn + drawAmt(c)
+  end
+
+  -- 미쿠가 드로우 스택 전부 받기
+  drawCards(g.deck, g.mh, totalDrawn)
+  g.stk = 0
+
+  -- Green8 마무리
+  for i, c in ipairs(g.uh) do
+    if c == "Green8" then
+      table.remove(g.uh, i)
+      g.top = "Green8"
+      g.col = "Green"
+      break
+    end
+  end
+
+  -- 시리즈 즉시 종료
+  g.active = false
+  g.us = 2  -- 유저 즉시 승리
+  g.winner = "user"
+  g.said = pick("event_collapse")
+  saveG(tid, g)
+  setState(tid, "said", g.said)
+  setState(tid, "winner", "user")
 end
 
 -- ========== ROUND/SERIES END ==========
@@ -571,6 +630,62 @@ local function buildUI(g)
   return table.concat(h)
 end
 
+-- ========== FIX8: 특수 이벤트 CSS + UI 빌더 ==========
+local CSS_ANIM = [[<style>
+@keyframes x-risu-shake{0%,100%{transform:translateX(0)}10%,30%,50%,70%,90%{transform:translateX(-4px)}20%,40%,60%,80%{transform:translateX(4px)}}
+@keyframes x-risu-cardfall{0%{opacity:0;transform:translateY(-30px) rotate(-5deg)}100%{opacity:1;transform:translateY(0) rotate(0)}}
+@keyframes x-risu-fadein{0%{opacity:0}100%{opacity:1}}
+.x-risu-evshake{animation:x-risu-shake .5s ease-in-out}
+.x-risu-evcard{animation:x-risu-cardfall .4s ease-out both}
+.x-risu-evmsg{animation:x-risu-fadein .6s ease-in both}
+</style>]]
+
+local function buildSpecialEventUI(g, evCards, mikuCard, collapseSaid, smugSaid)
+  -- evCards: 유저의 원래 13장 패 (table), mikuCard: 미쿠의 1장 패 (table)
+  local h = {CSS, CSS_ANIM}
+
+  table.insert(h, '<div class="x-risu-uu">')
+
+  -- Phase 1: 미쿠 기고만장
+  table.insert(h, '<div class="x-risu-evmsg" style="animation-delay:0s;padding:10px 0 6px">')
+  table.insert(h, '<div style="font-size:.8em;color:#ff9ecc;font-weight:bold;margin-bottom:4px">🌟 [1% 특수 이벤트]</div>')
+  table.insert(h, string.format('<div class="x-risu-ubbl">😆 <b>미쿠:</b> %s</div>', smugSaid))
+  table.insert(h, '<div class="x-risu-ulbl">미쿠 패 (1장)</div><div class="x-risu-uhnd">')
+  for _, c in ipairs(mikuCard) do
+    table.insert(h, string.format('<span class="x-risu-uc x-risu-%s">%s</span>', cardCls(c), cardLabel(c)))
+  end
+  table.insert(h, '</div></div>')
+
+  -- Phase 2: 유저 카드 13장 쏟아짐 (CSS shake + cardfall)
+  table.insert(h, '<div class="x-risu-evshake" style="animation-delay:.8s;padding:6px 0">')
+  table.insert(h, '<div class="x-risu-ulbl">유저 패 쏟아짐! (13장)</div><div class="x-risu-uhnd">')
+  for i, c in ipairs(evCards) do
+    local delay = string.format("calc(.8s + %d*0.1s)", i - 1)
+    table.insert(h, string.format(
+      '<span class="x-risu-uc x-risu-evcard x-risu-%s" style="animation-delay:%s">%s</span>',
+      cardCls(c), delay, cardLabel(c)
+    ))
+  end
+  table.insert(h, '</div></div>')
+
+  -- Phase 3: 미쿠 붕괴
+  table.insert(h, '<div class="x-risu-evmsg" style="animation-delay:2.2s;padding:6px 0">')
+  table.insert(h, string.format('<div class="x-risu-ubbl">😱 <b>미쿠:</b> %s</div>', collapseSaid))
+  -- game-over 패널
+  table.insert(h, string.format(
+    '<div style="background:rgba(0,188,212,.08);border:1px solid rgba(0,188,212,.25);border-radius:9px;padding:10px;text-align:center;margin-top:6px">'..
+    '<div style="font-size:1.2em;font-weight:900">🏆 유저 승리!</div>'..
+    '<div style="font-size:.82em;color:#c0c8e8;margin:4px 0">미쿠 %d : %d 유저</div>'..
+    '<div style="font-size:.75em;color:#e91e8c;font-weight:bold">미쿠가 벌칙을 수행합니다 ♡</div>'..
+    '</div>',
+    g.ms, g.us
+  ))
+  table.insert(h, '</div>')
+
+  table.insert(h, '<div class="x-risu-uft">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>')
+  return table.concat(h)
+end
+
 -- ========== CORE PLAY CARD ==========
 local function doPlay(tid, cardIdx)
   local g = loadG(tid)
@@ -694,9 +809,14 @@ function onInput(triggerId)
     g.rnd = 1
     g.said = "UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다♡ 시작할게~♡"
     setState(triggerId, "winner", "")
-    initRound(triggerId, g)
-    saveG(triggerId, g)
-    setInput(triggerId, "[게임 시작] UNO 게임이 시작됐습니다! 미쿠 손패: " .. #g.mh .. "장, 유저 손패: " .. #g.uh .. "장. 미쿠 대사: " .. g.said)
+    local isSpecial = initRound(triggerId, g)
+    if isSpecial then
+      autoPlaySpecialEvent(triggerId, g)
+      setInput(triggerId, "[특수 이벤트] 1% 확률 이벤트 발동! 미쿠 패 1장에서 시작했으나 유저의 드로우 카드 연쇄로 미쿠가 대량 드로우! 유저 Green8으로 피니시! 미쿠 대붕괴! 시리즈 즉시 종료. 미쿠 대사: " .. g.said)
+    else
+      saveG(triggerId, g)
+      setInput(triggerId, "[게임 시작] UNO 게임이 시작됐습니다! 미쿠 손패: " .. #g.mh .. "장, 유저 손패: " .. #g.uh .. "장. 미쿠 대사: " .. g.said)
+    end
     return
   end
 
@@ -792,7 +912,10 @@ function onOutput(triggerId)
   out = out:gsub("{%u[%u_]*|[^}]*}", "")
   -- Remove UNO_STATE blocks
   out = out:gsub("%[UNO_STATE%][%s%S]-%[/UNO_STATE%]", "")
+  -- FIX8: bare null (줄 끝의 리터럴 "null" 텍스트)
+  out = out:gsub("%f[%a]null%f[%A]", "")
   out = out:match("^%s*(.-)%s*$") or ""
+  if out == "" then out = " " end
   setOutput(triggerId, out)
 end
 
@@ -866,7 +989,20 @@ listenEdit("editDisplay", function(triggerId, data)
     data = data:gsub("{SIG|[^}]*}", "")
     data = data:gsub("{null}", "")
     data = data:gsub("{%u[%u_]*|[^}]*}", "") -- PATCH: broad pattern covers {BAT|..}, {FLOOR|..}, etc.
+    -- FIX8: bare null 제거
+    data = data:gsub("%f[%a]null%f[%A]", "")
+    data = data:match("^%s*(.-)%s*$") or ""
+    if data == "" then data = " " end
     local g = loadG(triggerId)
+    -- FIX8: 특수 이벤트 UI (1% 이벤트 + 게임 종료)
+    local special = safeGetState(triggerId, "special")
+    if special == "1" and not g.active and g.winner == "user" then
+      local evCards  = des(safeGetState(triggerId, "ev_cards")     or "")
+      local mikuCard = des(safeGetState(triggerId, "ev_miku_card") or "")
+      local smugSaid = safeGetState(triggerId, "ev_smug") or D.event_smug[1]
+      local ui = buildSpecialEventUI(g, evCards, mikuCard, g.said, smugSaid)
+      return data .. "\n\n" .. ui
+    end
     if not g.active then
       -- Show game-over panel if series ended
       if g.winner ~= "" then
@@ -891,6 +1027,10 @@ listenEdit("editDisplay", function(triggerId, data)
     return data .. "\n\n" .. ui
   end)
   -- FIX7: on error, include error message as HTML comment for debugging
-  if ok then return result else return data .. "<!-- LUA_ERR: " .. tostring(result) .. " -->" end
+  if ok then
+    return result ~= nil and result or data
+  else
+    return data .. "<!-- LUA_ERR: " .. tostring(result) .. " -->"
+  end
 end)
 

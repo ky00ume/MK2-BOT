@@ -1,1036 +1,933 @@
-
 -- ================================================
--- UNO GAME ENGINE for RISUAI - Hatsune Miku CharCard
+-- UNO GAME ENGINE v3.0 for RISUAI - Hatsune Miku CharCard
+-- Architecture: setChatVar/getChatVar + customScripts CBS
+-- Card notation: color_value (e.g. red_5, blue_skip, any_wild4)
 -- ================================================
 
 pcall(function() math.randomseed(os.time()) end)
 
+-- ========== CONSTANTS ==========
+local COLORS   = {"red","yellow","green","blue"}
+local SPECIALS = {"skip","reverse","draw2"}
+
+-- 1% special event: hand given to player so that playing green_8 triggers the cascade
+local CURSE_HAND =
+    "green_8,green_draw2,green_draw2,yellow_draw2,yellow_draw2,"
+    .. "blue_draw2,blue_draw2,red_draw2,red_draw2,"
+    .. "any_wild4,any_wild4,any_wild4,any_wild4"
+
+-- Lorebookentry content injected when the 1% event fires
+local CURSE_LORE =
+    "⚠️ 특수 이벤트 발동: 미쿠와나 나이스 트라이 원작 재현 이벤트\n\n"
+    .. "플레이어의 패가 전부 드로우 카드(+2×8, +4×4)였고 그린 8 하나로 미쿠에게 24장이 쏟아졌다.\n\n"
+    .. "반드시 아래 방식으로 반응:\n"
+    .. "1. 미쿠가 패닉 상태로 카드 더미를 보며 현실 부정\n"
+    .. "2. 테이블을 뒤집거나 카드를 날리며 도망치려 함\n"
+    .. "3. 울면서 방에서 도망치는 장면으로 마무리\n"
+    .. "4. 마지막 줄: \"...UNO를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다.\"\n\n"
+    .. "이 이벤트 중에는 평소의 메스가키 태도를 완전히 잃고 진짜로 무너져야 한다."
+
+-- ========== UTILS ==========
+local function nvl(v, default)
+    if not v or v == "" or v == "null" then return default end
+    return v
+end
+local function s(t) return table.concat(t, ",") end
+local function d(str)
+    if not str or str == "" then return {} end
+    local t = {}
+    for c in str:gmatch("[^,]+") do t[#t+1] = c end
+    return t
+end
+
+local function parseCard(card)
+    local c, v = card:match("^([^_]+)_(.+)$")
+    return c or "any", v or card
+end
+
+local function colorKr(c)
+    return ({red="빨강",yellow="노랑",green="초록",blue="파랑"})[c] or c
+end
+
+local function cardName(card)
+    local c, v = parseCard(card)
+    local vm = {skip="스킵",reverse="리버스",draw2="+2",wild="와일드",wild4="+4 와일드"}
+    if c == "any" then return vm[v] or v end
+    return colorKr(c) .. " " .. (vm[v] or v)
+end
+
+local function canPlay(card, top, cur)
+    local cc, cv = parseCard(card)
+    local tc, tv = parseCard(top)
+    local ac = cur ~= "" and cur or tc
+    if cc == "any" then return true end
+    if cc == ac then return true end
+    if cv == tv then return true end
+    return false
+end
+
+local function getPhase(triggerId)
+    local p = getChatVar(triggerId, "cv_phase") or "idle"
+    if p == "null" or p == "" then p = "idle" end
+    return p
+end
+
 -- ========== DIALOGUES ==========
 local D = {
-  win = {
-    "어쭈?♡ 그게 최선이야?♡ 너무 허~접♡",
-    "하하하♡ 이 정도면 내가 너무 잘하는 거 아니야?♡",
-    "흐으음♡ 너무 쉬운데?♡ 좀 더 노력해봐♡",
-    "내 패 봐~♡ 완벽하지♡ 너는?♡ 하하♡",
-    "♡♡♡ 나한테 이기려면 아직 멀었어~♡",
-    "이 기세라면 내가 이기는 거 아니야?♡ 당연하지~♡"
-  },
-  lose = {
-    "잠, 잠깐만!! 이게 말이 돼?!",
-    "야!! 반칙이잖아!! 다시 해!!",
-    "이건 카드가 이상한 거야. 분명히.",
-    "흥! 이번만이야!! 다음엔 절대 안 져!!",
-    "우연이야 우연!! 다음 판엔 내가 이겨!!"
-  },
-  uno = {
-    "UNO♡ 이제 끝이야~♡ 포기해~♡",
-    "UNO~♡♡♡ 기대해봐♡ 한 장 남았어~♡",
-    "UNO!!!♡ 어떡해~ 너무 신나~♡ 이겼다고♡"
-  },
-  comeback = {
-    "뭐?! 이게 무슨...! 아직 안 끝났어!!",
-    "허!? 그, 그래도 아직 내가 이길 수 있어!!",
-    "으으으... 인정 안 해!! 다시!!"
-  },
-  rwon = {
-    "이번 라운드는 내 거♡ 다음도 내가 이길게♡",
-    "역시 내가 UNO 천재♡ 너무 당연하지 않아?♡",
-    "하하♡ 이 기분~♡ 최고야♡ 다음 판도 각오해♡"
-  },
-  rlose = {
-    "으... 운이 좋았던 거야. 다음 판은 내가 이겨.",
-    "치! 이건 카드 배분이 이상했던 거야!!",
-    "...인정. 근데 다음은 달라."
-  },
-  swon = {
-    "HAHAHA♡♡♡ 내가 이겼어!!! 봤지?! 봤어?!♡ 이제 약속 지켜♡",
-    "3판 2선승♡ 완벽한 승리♡ 역시 미쿠님이시지♡ 벌칙 각오해♡",
-    "끝났어♡ 내가 이겼으니까 네가 벌칙 받아야 해♡ 도망가지 말고♡"
-  },
-  slose = {
-    "으아아아아아아아앙앙~!! 말도 안 돼!! 내가 왜 졌어!!",
-    "아아아아아앙~!!! 이건 꿈이야!! 꿈이라고!!!! 으아아아아앙!!!",
-    "...으아아아앙앙앙~.... 알았어 알았어... 약속은 지킬게... 으앙..."
-  },
-  event = {
-    "어?! 뭔가 이상하게 섞혔는데...? 어...어...어...?! 패가 1장?! 이건 내가 이기는 거잖아♡",
-    "잠깐 이게 무슨... 패가 고작 1장?? 에이 이건 내가 이기는 거 아니야?♡ 너 포기해~♡"
-  },
-  -- FIX8: 특수 이벤트 기고만장 대사
-  event_smug = {
-    "어?! 패가 1장?! 이건 내가 이기는 거잖아♡ 네 패는... 13장?! HAHAHA♡♡♡",
-    "잠깐 이게 무슨... 패가 고작 1장?? 이건 운명이야♡ 포기해~♡ HAHAHA♡"
-  },
-  -- FIX8: 특수 이벤트 미쿠 붕괴 대사
-  event_collapse = {
-    "...으아아아앙앙... 이, 이게 무슨... 말도 안... 돼......",
-    "어?! 어어?! 어어어어?!?! ...으아아아아아앙앙~!!!!!! 이건 뭐야!!!!",
-    "하...하하...하하하... ...으아아아아아앙앙앙앙~!!!! 거짓말이지?! 거짓말이라고 해!!!!!"
-  },
-  normal = {
-    "어서 카드 내봐♡",
-    "고민하지 말고 빨리♡",
-    "흥♡ 어떤 카드 낼 건데?♡",
-    "설마 드로우하려는 건 아니지?♡",
-    "♡",
-    "빨리~♡ 기다리잖아♡"
-  }
+    win = {
+        "어쭈?♡ 그게 최선이야?♡ 너무 허~접♡",
+        "하하하♡ 이 정도면 내가 너무 잘하는 거 아니야?♡",
+        "흐으음♡ 너무 쉬운데?♡ 좀 더 노력해봐♡",
+        "내 패 봐~♡ 완벽하지♡ 너는?♡ 하하♡",
+        "♡♡♡ 나한테 이기려면 아직 멀었어~♡",
+        "이 기세라면 내가 이기는 거 아니야?♡ 당연하지~♡"
+    },
+    lose = {
+        "잠, 잠깐만!! 이게 말이 돼?!",
+        "야!! 반칙이잖아!! 다시 해!!",
+        "이건 카드가 이상한 거야. 분명히.",
+        "흥! 이번만이야!! 다음엔 절대 안 져!!",
+        "우연이야 우연!! 다음 판엔 내가 이겨!!"
+    },
+    uno = {
+        "UNO♡ 이제 끝이야~♡ 포기해~♡",
+        "UNO~♡♡♡ 기대해봐♡ 한 장 남았어~♡",
+        "UNO!!!♡ 어떡해~ 너무 신나~♡ 이겼다고♡"
+    },
+    rwon = {
+        "이번 라운드는 내 거♡ 다음도 내가 이길게♡",
+        "역시 내가 UNO 천재♡ 너무 당연하지 않아?♡",
+        "하하♡ 이 기분~♡ 최고야♡ 다음 판도 각오해♡"
+    },
+    rlose = {
+        "으... 운이 좋았던 거야. 다음 판은 내가 이겨.",
+        "치! 이건 카드 배분이 이상했던 거야!!",
+        "...인정. 근데 다음은 달라."
+    },
+    swon = {
+        "HAHAHA♡♡♡ 내가 이겼어!!! 봤지?! 봤어?!♡ 이제 약속 지켜♡",
+        "3판 2선승♡ 완벽한 승리♡ 역시 미쿠님이시지♡ 벌칙 각오해♡",
+        "끝났어♡ 내가 이겼으니까 네가 벌칙 받아야 해♡ 도망가지 말고♡"
+    },
+    slose = {
+        "으아아아아아아아앙앙~!! 말도 안 돼!! 내가 왜 졌어!!",
+        "아아아아아앙~!!! 이건 꿈이야!! 꿈이라고!!!! 으아아아아앙!!!",
+        "...으아아아앙앙앙~.... 알았어 알았어... 약속은 지킬게... 으앙..."
+    },
+    event_smug = {
+        "어?! 패가 1장?! 이건 내가 이기는 거잖아♡ 네 패는... 13장?! HAHAHA♡♡♡",
+        "잠깐 이게 무슨... 패가 고작 1장?? 이건 운명이야♡ 포기해~♡ HAHAHA♡"
+    },
+    event_collapse = {
+        "...으아아아앙앙... 이, 이게 무슨... 말도 안... 돼......",
+        "어?! 어어?! 어어어어?!?! ...으아아아아아앙앙~!!!!!! 이건 뭐야!!!!",
+        "하...하하...하하하... ...으아아아아아앙앙앙앙~!!!! 거짓말이지?! 거짓말이라고 해!!!!!"
+    },
+    normal = {
+        "어서 카드 내봐♡",
+        "고민하지 말고 빨리♡",
+        "흥♡ 어떤 카드 낼 건데?♡",
+        "설마 드로우하려는 건 아니지?♡",
+        "♡",
+        "빨리~♡ 기다리잖아♡"
+    }
 }
 
 local function pick(cat)
-  local p = D[cat] or D.normal
-  return p[math.random(#p)]
-end
-
--- ========== CARD UTILITIES ==========
-local function cardColor(c)
-  if c:sub(1,3) == "Red" then return "Red"
-  elseif c:sub(1,4) == "Blue" then return "Blue"
-  elseif c:sub(1,5) == "Green" then return "Green"
-  elseif c:sub(1,6) == "Yellow" then return "Yellow"
-  else return "Wild" end
-end
-
-local function cardVal(c)
-  local co = cardColor(c)
-  if co == "Wild" then
-    return (c == "WildDraw4") and "WildDraw4" or "Wild"
-  end
-  return c:sub(#co + 1)
-end
-
-local function isNum(c)
-  return tonumber(cardVal(c)) ~= nil
-end
-
-local function isAction(c)
-  return not isNum(c)
-end
-
-local function isDraw(c)
-  local v = cardVal(c)
-  return v == "Draw2" or v == "WildDraw4"
-end
-
-local function drawAmt(c)
-  local v = cardVal(c)
-  if v == "Draw2" then return 2
-  elseif v == "WildDraw4" then return 4
-  else return 0 end
-end
-
-local function canPlay(c, top, color)
-  if cardColor(c) == "Wild" then return true end
-  return cardColor(c) == color or cardVal(c) == cardVal(top)
+    local p = D[cat] or D.normal
+    return p[math.random(#p)]
 end
 
 -- ========== DECK ==========
-local function mkDeck()
-  local d = {}
-  for _, co in ipairs({"Red","Blue","Green","Yellow"}) do
-    for v = 0, 9 do
-      table.insert(d, co..v)
-      if v > 0 then table.insert(d, co..v) end
+local function createDeck()
+    local deck = {}
+    for _, color in ipairs(COLORS) do
+        deck[#deck+1] = color .. "_0"
+        for _, n in ipairs({"1","2","3","4","5","6","7","8","9"}) do
+            deck[#deck+1] = color .. "_" .. n
+            deck[#deck+1] = color .. "_" .. n
+        end
+        for _, sp in ipairs(SPECIALS) do
+            deck[#deck+1] = color .. "_" .. sp
+            deck[#deck+1] = color .. "_" .. sp
+        end
     end
-    for _, s in ipairs({"Skip","Reverse","Draw2"}) do
-      table.insert(d, co..s)
-      table.insert(d, co..s)
+    for i = 1, 4 do deck[#deck+1] = "any_wild" end
+    for i = 1, 4 do deck[#deck+1] = "any_wild4" end
+    return deck
+end
+
+local function shuffle(deck)
+    for i = #deck, 2, -1 do
+        local j = math.random(1, i)
+        deck[i], deck[j] = deck[j], deck[i]
     end
-  end
-  for i = 1, 4 do
-    table.insert(d, "Wild")
-    table.insert(d, "WildDraw4")
-  end
-  return d
+    return deck
 end
 
-local function shuffle(t)
-  for i = #t, 2, -1 do
-    local j = math.random(i)
-    t[i], t[j] = t[j], t[i]
-  end
-  return t
-end
-
--- ========== SERIALIZATION ==========
-local function ser(t)
-  if #t == 0 then return "" end
-  return table.concat(t, ",")
-end
-
-local function des(s)
-  if not s or s == "" then return {} end
-  local t = {}
-  for x in (s .. ","):gmatch("([^,]*),") do
-    local c = x:match("^%s*(.-)%s*$")
-    if c ~= "" then table.insert(t, c) end
-  end
-  return t
-end
-
--- ========== STATE I/O ==========
--- safeGetState: wraps getState in pcall so that json.decode(nil) on a fresh
--- chat (no prior saved state) returns nil instead of throwing an error.
-local function safeGetState(tid, name)
-  local ok, val = pcall(getState, tid, name)
-  if ok then return val else return nil end
-end
-
-local function loadG(tid)
-  return {
-    deck  = des(safeGetState(tid,"deck")  or ""),
-    mh    = des(safeGetState(tid,"mh")    or ""),
-    uh    = des(safeGetState(tid,"uh")    or ""),
-    top   = safeGetState(tid,"top")   or "",
-    col   = safeGetState(tid,"col")   or "Red",
-    turn  = safeGetState(tid,"turn")  or "user",
-    ms    = tonumber(safeGetState(tid,"ms"))  or 0,
-    us    = tonumber(safeGetState(tid,"us"))  or 0,
-    rnd   = tonumber(safeGetState(tid,"rnd")) or 1,
-    active= (safeGetState(tid,"active") == "1"),
-    uno   = (safeGetState(tid,"uno")    == "1"),
-    stk   = tonumber(safeGetState(tid,"stk")) or 0,
-    said  = safeGetState(tid,"said")  or "♡",
-    winner= safeGetState(tid,"winner") or ""
-  }
-end
-
-local function saveG(tid, g)
-  setState(tid,"deck",  ser(g.deck))
-  setState(tid,"mh",    ser(g.mh))
-  setState(tid,"uh",    ser(g.uh))
-  setState(tid,"top",   g.top)
-  setState(tid,"col",   g.col)
-  setState(tid,"turn",  g.turn)
-  setState(tid,"ms",    tostring(g.ms))
-  setState(tid,"us",    tostring(g.us))
-  setState(tid,"rnd",   tostring(g.rnd))
-  setState(tid,"active",g.active and "1" or "0")
-  setState(tid,"uno",   g.uno   and "1" or "0")
-  setState(tid,"stk",   tostring(g.stk))
-  setState(tid,"said",  g.said)
-  setState(tid,"winner",g.winner or "") -- PATCH: persist winner so stale values don't leak across games
-end
-
--- ========== DRAW ==========
-local function drawCards(deck, hand, n)
-  for i = 1, n do
-    if #deck == 0 then break end
-    table.insert(hand, table.remove(deck))
-  end
-end
-
--- ========== MIKU AI TURN ==========
-local function mikuPickCard(g)
-  if g.stk > 0 then
-    for i, c in ipairs(g.mh) do
-      if isDraw(c) then return i end
+-- Draw `count` cards into `hand`. Updates pile in CV. If isAI, also updates cv_ai_hand/cv_ai_count.
+local function drawCards(triggerId, hand, count, isAI)
+    local pile = d(getChatVar(triggerId, "cv_draw_pile") or "")
+    if #pile == 0 then
+        local newDeck = shuffle(createDeck())
+        for i = 1, #newDeck do pile[#pile+1] = newDeck[i] end
+        setChatVar(triggerId, "cv_draw_pile", s(pile))
     end
-    return nil
-  end
-  -- prefer action cards (not as last card due to house rule)
-  for i, c in ipairs(g.mh) do
-    if canPlay(c, g.top, g.col) and isAction(c) and #g.mh > 1 then
-      return i
+    for i = 1, count do
+        if #pile == 0 then break end
+        hand[#hand+1] = table.remove(pile, 1)
     end
-  end
-  -- number cards
-  for i, c in ipairs(g.mh) do
-    if canPlay(c, g.top, g.col) and isNum(c) then
-      return i
+    setChatVar(triggerId, "cv_draw_pile", s(pile))
+    if isAI then
+        setChatVar(triggerId, "cv_ai_hand", s(hand))
+        setChatVar(triggerId, "cv_ai_count", tostring(#hand))
     end
-  end
-  -- last resort: action card even if only 1 left (can't win but can still play)
-  for i, c in ipairs(g.mh) do
-    if canPlay(c, g.top, g.col) then return i end
-  end
-  return nil
 end
 
-local function mikuChooseColor(mh)
-  local cnt = {Red=0,Blue=0,Green=0,Yellow=0}
-  for _, c in ipairs(mh) do
-    local co = cardColor(c)
-    if cnt[co] then cnt[co] = cnt[co] + 1 end
-  end
-  local best = "Red"
-  for co, n in pairs(cnt) do
-    if n > cnt[best] then best = co end
-  end
-  return best
+-- AI picks the best card: prefers action cards, then numbers
+local function aiPick(hand, top, cur)
+    local playable = {}
+    for i, card in ipairs(hand) do
+        if canPlay(card, top, cur) then playable[#playable+1] = {i, card} end
+    end
+    if #playable == 0 then return nil end
+    for _, item in ipairs(playable) do
+        local _, v = parseCard(item[2])
+        if v == "skip" or v == "reverse" or v == "draw2" or v == "wild4" then
+            return item[1], item[2]
+        end
+    end
+    return playable[1][1], playable[1][2]
 end
 
--- Returns true if miku won this turn
-local function mikuDoTurn(tid, g)
-  local MAX_EXTRA = 3
-  for extra = 1, MAX_EXTRA do
-    -- Handle incoming draw stack
-    if g.stk > 0 then
-      local canStack = false
-      for _, c in ipairs(g.mh) do
-        if isDraw(c) then canStack = true; break end
-      end
-      if not canStack then
-        drawCards(g.deck, g.mh, g.stk)
-        g.stk = 0
-        g.said = pick("lose")
-        g.turn = "user"
-        return false
-      end
+-- ========== MIKU LINE ==========
+local function getMikuLine(triggerId)
+    local action  = nvl(getChatVar(triggerId, "cv_last_action"), "")
+    local aiCnt   = tonumber(nvl(getChatVar(triggerId, "cv_ai_count"), "7")) or 7
+    local ph      = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    local pCnt    = #ph
+    local turn    = nvl(getChatVar(triggerId, "cv_turn"), "player")
+    local gameNum = tonumber(nvl(getChatVar(triggerId, "cv_game_num"), "1")) or 1
+    local curse   = getChatVar(triggerId, "cv_draw_curse") or ""
+
+    if curse == "ready" then return "😏", pick("event_smug") end
+    if curse == "end"   then return "😭", pick("event_collapse") end
+
+    if action == "player_uno"       then return "😱", "야야야!!! UNO?! 진짜야?! 안돼 안돼!!" end
+    if action == "ai_uno"           then return "😏", pick("uno") end
+    if action == "ai_wild4"         then return "😈", "+4~ 미안~ 안 미안~🤭 받아~" end
+    if action == "ai_draw2"         then return "🤭", "+2 선물이야~ 받아~" end
+    if action == "player_wild4"     then return "😡", "야!!! 4장이나?! 진심이야?!" end
+    if action == "player_draw2"     then return "😤", "치사하게 +2야? 두고 봐." end
+    if action == "ai_skip"          then return "😏", "스킵~ 니 턴 없어~ 구경해~" end
+    if action == "player_skip"      then return "😠", "야 스킵은 좀 치사하지 않냐!!" end
+    if action == "player_reverse"   then return "😮", "어?! 리버스?! 얌체야?" end
+    if action == "ai_reverse"       then return "😏", "리버스~ 순서 바꿨어~" end
+    if action == "player_wild"      then return "🤔", "색깔 잘 골라봐~ 틀리면 나만 좋아~" end
+    if action == "ai_wild"          then return "😏", "색깔은 내가 정할게~" end
+    if action == "ai_draw" then
+        return (aiCnt >= 8) and "😩" or "😌", "여유 있어서 뽑는 거야~ 전략."
     end
+    if action == "player_draw"      then return "😏", "낼 카드 없어? ㅋㅋ 뽑고 있어~" end
+    if action == "game_start"       then return "😏", "자 시작이야~ 나이스 트라이나 해봐~" end
+    if action == "round_win_ai"     then return "😏", pick("rwon") end
+    if action == "round_win_player" then return "😤", pick("rlose") end
+    if action == "match_win_ai"     then return "😏", pick("swon") end
+    if action == "match_win_player" then return "😭", pick("slose") end
 
-    local idx = mikuPickCard(g)
-    if idx == nil then
-      -- Draw one
-      drawCards(g.deck, g.mh, 1)
-      local drawn = g.mh[#g.mh]
-      if canPlay(drawn, g.top, g.col) and not (isAction(drawn) and #g.mh == 1) then
-        idx = #g.mh
-      else
-        g.said = pick("normal")
-        g.turn = "user"
-        return false
-      end
+    if aiCnt == 1  then return "😏", "UNO!! 이제 끝이야~ 나이스 트라이나 해봐" end
+    if pCnt  == 1  then return "😨", "잠깐...!! 패가 한 장?! 집중해야겠다!!" end
+    if aiCnt == 2  then return "🤭", "한 장만 더 내면 끝~ 어떻게 막을 건데?" end
+    if pCnt  == 2  then return "😤", "...설마 이길 생각이야? 웃기고 있네." end
+    if aiCnt >= 10 then return "😰", "패가 좀 많긴 한데. 전략이야." end
+    if aiCnt >= 8  then return "😅", "왜 이렇게 패가 많아... 일부러 모은 거야." end
+    if gameNum == 3 then return "😤", "마지막 판이야~ 집중해!!" end
+    if gameNum == 2 then return "💪", "1판은 워밍업이었어~ 이제 진짜야." end
+    if turn == "player" then return "😏", pick("normal") end
+    return "🎴", "집중해~ 방심하면 나한테 져~"
+end
+
+-- ========== CARD HTML ==========
+local bgCol = {red="#cb0323",yellow="#e8b800",green="#1a8a2e",blue="#1244c7"}
+
+local function cardHTML(card, idx, playable, isBack)
+    local c, v = parseCard(card)
+    local vm  = {skip="Skip",reverse="Rev",draw2="+2",wild="Wild",wild4="+4"}
+    local vd  = vm[v] or v
+    local glow = playable and "box-shadow:0 0 12px 3px gold;transform:translateY(-5px);" or ""
+    local cur  = playable and "cursor:pointer;" or "cursor:default;"
+    local btn  = playable and (' risu-btn="play-' .. idx .. '"') or ""
+    local wrap = '<div style="display:inline-block;margin:3px;vertical-align:top;' .. cur .. glow .. '"' .. btn .. '>'
+    if isBack then
+        return wrap
+            .. '<div style="width:60px;height:90px;border-radius:8px;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;border:2px solid #39c5bb;">'
+            .. '<div style="position:absolute;background:rgba(57,197,187,0.15);inset:0;border-radius:100%;transform:scale(0.85) skewX(-22deg);"></div>'
+            .. '<div style="position:absolute;width:82%;height:54%;border-radius:50%;border:1.5px solid rgba(57,197,187,0.4);transform:rotate(-30deg);"></div>'
+            .. '<span style="position:relative;font-size:0.85rem;font-weight:900;color:#39c5bb;transform:rotate(-15deg);z-index:1;letter-spacing:1px;">UNO</span>'
+            .. '</div></div>'
     end
+    local frontBg = (c == "any")
+        and 'background:conic-gradient(#cb0323 0% 25%,#e8b800 25% 50%,#1a8a2e 50% 75%,#1244c7 75% 100%);'
+        or  ('background:' .. (bgCol[c] or "#555") .. ';')
+    return wrap
+        .. '<div style="width:60px;height:90px;border-radius:8px;' .. frontBg
+        .. 'display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;overflow:hidden;border:2px solid rgba(255,255,255,0.25);">'
+        .. '<div style="position:absolute;width:82%;height:54%;border-radius:50%;border:2px solid rgba(255,255,255,0.4);transform:rotate(-30deg);pointer-events:none;"></div>'
+        .. '<span style="position:absolute;top:3px;left:4px;font-size:0.62rem;font-weight:900;color:#fff;text-shadow:-1px -1px 0 #000,1px 1px 0 #000;z-index:1;">' .. vd .. '</span>'
+        .. '<span style="position:relative;font-size:1.55rem;font-weight:900;color:#fff;text-shadow:-1px -1px 0 #000,1px 1px 0 #000;z-index:1;">' .. vd .. '</span>'
+        .. '<span style="position:absolute;bottom:3px;right:4px;font-size:0.62rem;font-weight:900;color:#fff;text-shadow:-1px -1px 0 #000,1px 1px 0 #000;transform:rotate(180deg);z-index:1;">' .. vd .. '</span>'
+        .. '</div></div>'
+end
 
-    local c = table.remove(g.mh, idx)
-    g.top = c
-    g.col = cardColor(c)
+-- ========== PANEL / STATUS / BOTTOM-UI ==========
+-- Panel button HTML prefix/mid/suffix (split so cv_panel_label / cv_panel_sub can be interpolated)
+local PANEL_BTN_PREFIX =
+    '<div style="display:flex;justify-content:center;margin:6px 0;">'
+    .. '<div risu-btn="game-start" style="display:flex;align-items:center;gap:10px;padding:8px 14px 8px 10px;'
+    .. 'background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);border:1px solid rgba(57,197,187,0.3);'
+    .. 'border-radius:10px;cursor:pointer;">'
+    .. '<div style="position:relative;width:32px;height:48px;flex-shrink:0;">'
+    .. '<div style="position:absolute;top:5px;left:3px;width:28px;height:40px;border-radius:5px;background:#162535;border:1px solid #1e3548;"></div>'
+    .. '<div style="position:absolute;top:2px;left:1px;width:28px;height:40px;border-radius:5px;background:#1a2f42;border:1px solid #243f55;"></div>'
+    .. '<div style="position:absolute;top:0;left:0;width:28px;height:40px;border-radius:5px;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);border:1px solid #39c5bb;display:flex;align-items:center;justify-content:center;">'
+    .. '<div style="position:absolute;width:76%;height:50%;border-radius:50%;border:1px solid rgba(57,197,187,0.35);transform:rotate(-30deg);"></div>'
+    .. '<span style="position:relative;z-index:1;font-size:0.45rem;font-weight:900;color:#39c5bb;transform:rotate(-15deg);letter-spacing:1.5px;font-family:sans-serif;">UNO</span>'
+    .. '</div></div>'
+    .. '<div style="display:flex;flex-direction:column;gap:2px;margin-left:4px;">'
+    .. '<span style="background:#cb0323;color:#e4c713;font-size:0.42rem;font-weight:900;padding:1px 5px;border-radius:3px;letter-spacing:1px;border:1px solid #e4c713;font-family:sans-serif;">UNO</span>'
+    .. '<span style="font-size:0.75rem;font-weight:900;color:#39c5bb;font-family:sans-serif;">'
+local PANEL_BTN_MID    = '</span><span style="font-size:0.5rem;color:rgba(255,255,255,0.45);font-family:sans-serif;">'
+local PANEL_BTN_SUFFIX = '</span></div></div></div>'
 
-    if g.col == "Wild" then
-      g.col = mikuChooseColor(g.mh)
+local function savePanel(triggerId)
+    local phase = getPhase(triggerId)
+    if phase == "playing" then
+        setChatVar(triggerId, "cv_panel_html", "")
+        setChatVar(triggerId, "cv_panel_label", "")
+        setChatVar(triggerId, "cv_panel_sub", "")
+        return
     end
-
-    -- Check win
-    if #g.mh == 0 then
-      g.said = pick("rwon")
-      g.turn = "user"
-      return true
-    end
-
-    local v = cardVal(c)
-    if v == "Skip" or v == "Reverse" then
-      g.said = pick("win") .. " スキップ♡"
-      -- Miku goes again in 2-player (loop)
-    elseif v == "Draw2" then
-      g.stk = g.stk + 2
-      g.said = pick("win") .. " +2♡"
-      g.turn = "user"
-      return false
-    elseif v == "WildDraw4" then
-      g.stk = g.stk + 4
-      g.said = pick("win") .. " +4♡♡"
-      g.turn = "user"
-      return false
+    setChatVar(triggerId, "cv_panel_html", "show")
+    if phase == "match_end" then
+        setChatVar(triggerId, "cv_panel_label", "다시 하기")
+        setChatVar(triggerId, "cv_panel_sub", "벌칙 RP 후 누르세요")
+    elseif phase == "between_games" then
+        setChatVar(triggerId, "cv_panel_label", "다음 판 시작")
+        setChatVar(triggerId, "cv_panel_sub", "버튼을 눌러 다음 판을 시작하세요")
     else
-      if #g.mh == 1 then
-        g.said = pick("uno")
-      elseif #g.mh <= 3 then
-        g.said = pick("win")
-      elseif #g.mh > 8 then
-        g.said = pick("lose")
-      else
-        g.said = pick("normal")
-      end
-      g.turn = "user"
-      return false
+        setChatVar(triggerId, "cv_panel_label", "게임 시작")
+        setChatVar(triggerId, "cv_panel_sub", "카드를 눌러서 시작")
     end
-  end
-  g.turn = "user"
-  return false
 end
 
--- ========== ROUND INIT ==========
-local function initRound(tid, g)
-  local deck = shuffle(mkDeck())
-  local special = (math.random(100) == 1)
+local function saveBottomUI(triggerId)
+    local phase = getPhase(triggerId)
+    if phase == "playing" then
+        -- Only inject bottom-UI when the game message is NOT the last message
+        -- (prevents duplicating UI that is already shown via {UNO_GAME} placeholder)
+        local gameIdx = tonumber(nvl(getChatVar(triggerId, "cv_game_msg_idx"), "-1")) or -1
+        local chatLen = getChatLength(triggerId) or 0
+        if gameIdx >= 0 and (chatLen - 1) > gameIdx then
+            local gameHTML = getChatVar(triggerId, "cv_game_html") or ""
+            setChatVar(triggerId, "cv_bottom_ui", "\n" .. gameHTML)
+        else
+            setChatVar(triggerId, "cv_bottom_ui", "")
+        end
+        return
+    end
+    -- match_end / between_games: keep status bar + restart button visible under RP messages
+    local statusHtml = getChatVar(triggerId, "cv_status_html") or ""
+    local label      = nvl(getChatVar(triggerId, "cv_panel_label"), "다시 하기")
+    local sub        = nvl(getChatVar(triggerId, "cv_panel_sub"),   "벌칙 RP 후 누르세요")
+    local panelHtml  = PANEL_BTN_PREFIX .. label .. PANEL_BTN_MID .. sub .. PANEL_BTN_SUFFIX
+    setChatVar(triggerId, "cv_bottom_ui", "\n" .. statusHtml .. "\n" .. panelHtml)
+end
 
-  if special then
-    g.mh = {}
-    g.uh = {}
-    -- Miku: 1 non-action number card
-    for i = #deck, 1, -1 do
-      if isNum(deck[i]) and cardColor(deck[i]) ~= "Wild" then
-        table.insert(g.mh, table.remove(deck, i))
-        break
-      end
+local function saveStatus(triggerId)
+    local phase = getPhase(triggerId)
+    local wp = nvl(getChatVar(triggerId, "cv_wins_player"), "0")
+    local wa = nvl(getChatVar(triggerId, "cv_wins_ai"),     "0")
+    local gn = nvl(getChatVar(triggerId, "cv_game_num"),    "1")
+    local stateText
+    if     phase == "playing"       then stateText = "게임 중"
+    elseif phase == "between_games" then stateText = "판 종료"
+    elseif phase == "match_end"     then stateText = "매치 종료"
+    else                                 stateText = "대기 중" end
+    local mono = getChatVar(triggerId, "cv_status_mono") or ""
+    if mono == "" or mono == "null" then mono = "..." end
+    local html =
+        '<div class="uno-status">'
+        .. '<div class="us-img" style="background-image:url({{source::char}});"></div>'
+        .. '<div class="us-fade"></div>'
+        .. '<span class="us-score">나 ' .. wp .. '승 : 미쿠 ' .. wa .. '승</span>'
+        .. '<span class="us-sub">'   .. gn .. '/3판 &nbsp;·&nbsp; ' .. stateText .. '</span>'
+        .. '<span class="us-mono">'  .. mono .. '</span>'
+        .. '</div>'
+    setChatVar(triggerId, "cv_status_html", html)
+    saveBottomUI(triggerId)
+end
+
+-- ========== BUILD GAME UI ==========
+local function buildUI(triggerId)
+    local phase = getPhase(triggerId)
+    if phase ~= "playing" then return "" end
+
+    local top    = nvl(getChatVar(triggerId, "cv_top_card"),       "")
+    local cur    = nvl(getChatVar(triggerId, "cv_current_color"),  "red")
+    local ph     = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    local aiHand = d(nvl(getChatVar(triggerId, "cv_ai_hand"),     ""))
+    local aiCnt  = #aiHand
+    local pile   = d(nvl(getChatVar(triggerId, "cv_draw_pile"),   ""))
+    local turn   = nvl(getChatVar(triggerId, "cv_turn"),          "player")
+    local msg    = nvl(getChatVar(triggerId, "cv_message"),        "")
+    local unoCall   = nvl(getChatVar(triggerId, "cv_uno_call"),    "0")
+    local choose    = nvl(getChatVar(triggerId, "cv_choose_color"),"0")
+    local unoPending= getChatVar(triggerId, "cv_uno_pending") or "0"
+
+    local emoji, line = getMikuLine(triggerId)
+    local dotBg = ({red="#cb0323",yellow="#e8b800",green="#1a8a2e",blue="#1244c7"})[cur] or "#888"
+    local dot = '<span style="display:inline-block;width:13px;height:13px;border-radius:50%;border:2px solid #fff;background:' .. dotBg .. ';vertical-align:middle;margin:0 3px;"></span>'
+
+    -- Top card
+    local topHTML = top ~= "" and cardHTML(top, 0, false, false)
+        or '<div style="width:60px;height:90px;border:2px dashed rgba(255,255,255,0.2);border-radius:8px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.3);">?</div>'
+
+    -- Miku's hand (face-down)
+    local aiHTML = '<div style="display:flex;flex-wrap:wrap;gap:1px;justify-content:center;">'
+    for i = 1, math.min(aiCnt, 10) do aiHTML = aiHTML .. cardHTML("x_b", i, false, true) end
+    if aiCnt > 10 then aiHTML = aiHTML .. '<span style="align-self:center;font-size:0.72rem;opacity:0.55;">+' .. (aiCnt - 10) .. '장</span>' end
+    aiHTML = aiHTML .. '</div>'
+
+    -- Player's hand (face-up, playable cards glow)
+    local isChoosing   = choose == "1"
+    local isPlayerTurn = turn == "player"
+    local phHTML = '<div style="display:flex;flex-wrap:wrap;gap:1px;justify-content:center;">'
+    for i, card in ipairs(ph) do
+        phHTML = phHTML .. cardHTML(card, i, isPlayerTurn and not isChoosing and canPlay(card, top, cur), false)
     end
-    -- User: Green8 + draw cards (total 13)
-    local g8idx = nil
-    for i, c in ipairs(deck) do
-      if c == "Green8" then g8idx = i; break end
+    phHTML = phHTML .. '</div>'
+
+    -- Action buttons
+    local drawBtn = (isPlayerTurn and not isChoosing)
+        and '<button style="padding:7px 16px;background:#3a7bd5;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;" risu-btn="uno-draw">카드 뽑기</button>'
+        or ''
+
+    local unoBtn = ""
+    if #ph == 2 and unoCall == "0" and isPlayerTurn and not isChoosing then
+        local canPlayAny = false
+        for _, card in ipairs(ph) do
+            if canPlay(card, top, cur) then canPlayAny = true; break end
+        end
+        if canPlayAny then
+            unoBtn = '<button style="padding:7px 16px;background:#e4c713;color:#111;border:none;border-radius:7px;font-size:0.9rem;font-weight:900;cursor:pointer;" risu-btn="uno-call">UNO!</button>'
+        end
     end
-    if g8idx then
-      table.insert(g.uh, table.remove(deck, g8idx))
-    else
-      table.insert(g.uh, "Green8")
+
+    local unoPendingBtn = ""
+    if unoPending == "1" and turn == "player" then
+        unoPendingBtn = '<button style="padding:7px 14px;background:#cb0323;color:#fff;border:none;border-radius:7px;font-size:0.78rem;font-weight:900;cursor:pointer;" risu-btn="penalty-call">😈 UNO 안 외쳤어!</button>'
     end
-    local fills = {}
-    for i = #deck, 1, -1 do
-      if isDraw(deck[i]) then
-        table.insert(fills, table.remove(deck, i))
-        if #fills >= 12 then break end
-      end
+
+    -- Color picker (shown after wild card)
+    local colorPicker = ""
+    if choose == "1" then
+        colorPicker = '<div style="display:flex;flex-direction:column;gap:4px;background:rgba(0,0,0,0.55);padding:8px;border-radius:8px;">'
+            .. '<p style="font-size:0.78rem;color:#fff;margin-bottom:2px;">색상 선택:</p>'
+            .. '<button style="padding:5px;background:#cb0323;color:#fff;border:1px solid #fff;border-radius:5px;font-weight:700;cursor:pointer;" risu-btn="color-red">빨강</button>'
+            .. '<button style="padding:5px;background:#e8b800;color:#111;border:1px solid #fff;border-radius:5px;font-weight:700;cursor:pointer;" risu-btn="color-yellow">노랑</button>'
+            .. '<button style="padding:5px;background:#1a8a2e;color:#fff;border:1px solid #fff;border-radius:5px;font-weight:700;cursor:pointer;" risu-btn="color-green">초록</button>'
+            .. '<button style="padding:5px;background:#1244c7;color:#fff;border:1px solid #fff;border-radius:5px;font-weight:700;cursor:pointer;" risu-btn="color-blue">파랑</button>'
+            .. '</div>'
     end
-    for _, c in ipairs(fills) do table.insert(g.uh, c) end
-    while #g.uh < 13 and #deck > 0 do
-      table.insert(g.uh, table.remove(deck))
+
+    -- FX badge for last action
+    local fxBadge = ""
+    local act = getChatVar(triggerId, "cv_last_action") or ""
+    if act == "ai_skip" or act == "player_skip" then
+        fxBadge = '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-weight:900;font-size:0.75rem;font-family:sans-serif;letter-spacing:1px;background:rgba(255,107,53,0.2);border:1.5px solid #ff6b35;color:#ff6b35;margin-right:6px;flex-shrink:0;">SKIP</span>'
+    elseif act == "ai_reverse" or act == "player_reverse" then
+        fxBadge = '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-weight:900;font-size:0.75rem;font-family:sans-serif;letter-spacing:1px;background:rgba(167,139,250,0.2);border:1.5px solid #a78bfa;color:#a78bfa;margin-right:6px;flex-shrink:0;">REV</span>'
+    elseif act == "ai_draw2" or act == "player_draw2" then
+        fxBadge = '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-weight:900;font-size:0.75rem;font-family:sans-serif;letter-spacing:1px;background:rgba(203,3,35,0.2);border:1.5px solid #cb0323;color:#ff6b6b;margin-right:6px;flex-shrink:0;">+2</span>'
+    elseif act == "ai_wild4" or act == "player_wild4" then
+        fxBadge = '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-weight:900;font-size:0.75rem;font-family:sans-serif;letter-spacing:1px;background:rgba(203,3,35,0.2);border:1.5px solid #cb0323;color:#ff6b6b;margin-right:6px;flex-shrink:0;">+4</span>'
+    elseif act == "ai_wild" or act == "player_wild" or act == "color_chosen" then
+        fxBadge = '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-weight:900;font-size:0.75rem;font-family:sans-serif;letter-spacing:1px;background:rgba(57,197,187,0.2);border:1.5px solid #39c5bb;color:#39c5bb;margin-right:6px;flex-shrink:0;">WILD</span>'
+    elseif act == "ai_uno" or act == "player_uno" then
+        fxBadge = '<span style="display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-weight:900;font-size:0.75rem;font-family:sans-serif;letter-spacing:1.5px;background:rgba(228,199,19,0.2);border:1.5px solid #e4c713;color:#e4c713;margin-right:6px;flex-shrink:0;">UNO!</span>'
     end
-    setState(tid, "special", "1")
-    local smugLine = pick("event_smug")
-    setState(tid, "ev_smug", smugLine) -- saved for buildSpecialEventUI to replay consistently
-    g.said = smugLine                  -- used in AI context message via setInput
-  else
-    g.mh = {}
-    g.uh = {}
+
+    local aiThink = (turn == "ai" and aiCnt > 0) and '<div style="font-size:0.78rem;opacity:0.5;font-style:italic;text-align:center;">미쿠 생각 중...</div>' or ''
+    local msgHTML = msg ~= "" and ('<div style="background:rgba(255,255,255,0.09);border-left:3px solid #e4c713;padding:5px 9px;border-radius:0 6px 6px 0;font-size:0.82rem;margin:4px 0;">' .. msg .. '</div>') or ''
+
+    return '<div style="width:100%;max-width:640px;margin:0 auto 8px;padding:10px;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);border-radius:14px;color:#fff;font-family:sans-serif;position:relative;">'
+        .. '<div style="background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:10px;padding:8px 12px;margin-bottom:8px;display:flex;align-items:center;gap:8px;">'
+            .. fxBadge
+            .. '<span style="font-size:1.4rem;">' .. emoji .. '</span>'
+            .. '<span style="font-size:0.88rem;color:#f0f0f0;font-style:italic;">&quot;' .. line .. '&quot;</span>'
+        .. '</div>'
+        .. '<div style="display:flex;justify-content:space-between;padding:4px 8px;background:rgba(255,255,255,0.08);border-radius:7px;margin-bottom:6px;font-size:0.8rem;">'
+            .. '<span>미쿠 패: ' .. aiCnt .. '장</span>' .. dot .. '<span>덱: ' .. #pile .. '장</span>'
+        .. '</div>'
+        .. '<div style="background:rgba(255,255,255,0.04);border-radius:8px;padding:6px;margin-bottom:5px;">' .. aiHTML .. '</div>'
+        .. msgHTML
+        .. '<div style="display:flex;justify-content:center;align-items:flex-start;gap:14px;margin:5px 0;">'
+            .. '<div style="display:flex;flex-direction:column;align-items:center;gap:3px;">'
+                .. '<span style="font-size:0.7rem;opacity:0.55;">버린 카드' .. dot .. '</span>'
+                .. topHTML
+            .. '</div>'
+            .. '<div style="display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:14px;">'
+                .. drawBtn .. unoBtn .. unoPendingBtn .. colorPicker .. aiThink
+            .. '</div>'
+        .. '</div>'
+        .. '<div style="background:rgba(255,255,255,0.06);border-radius:10px;padding:8px;">'
+            .. '<div style="font-size:0.7rem;opacity:0.55;margin-bottom:3px;">내 패: ' .. #ph .. '장</div>'
+            .. phHTML
+        .. '</div>'
+        .. '</div>'
+end
+
+local function saveUI(triggerId)
+    setChatVar(triggerId, "cv_game_html", buildUI(triggerId))
+end
+
+-- ========== RANDOM SEED (wasmoon-safe) ==========
+local _seedCounter = 0
+local function safeRandomSeed(triggerId)
+    _seedCounter = _seedCounter + 1
+    local seed = _seedCounter * 31
+    local addrStr = tostring({})
+    local addr = tonumber(addrStr:match("0x(%x+)") or addrStr:match("(%d+)")) or 0
+    seed = seed + addr
+    pcall(function() seed = seed + os.time() end)
+    pcall(function() seed = seed + math.floor(os.clock() * 100000) end)
+    if triggerId then
+        local cnt = tonumber(getChatVar(triggerId, "cv_rng_counter") or "0") or 0
+        cnt = cnt + 1
+        setChatVar(triggerId, "cv_rng_counter", tostring(cnt))
+        seed = seed + cnt * 7919
+        local chatLen = getChatLength(triggerId) or 0
+        seed = seed + chatLen * 1337
+    end
+    if seed < 1000 then seed = seed + 9999 end
+    math.randomseed(seed)
+    for i = 1, 10 do math.random() end
+end
+
+-- ========== START NEW GAME (internal) ==========
+local function startNewGame(triggerId)
+    safeRandomSeed(triggerId)
+    upsertLocalLoreBook(triggerId, "curse_event_active", "", {key="curse_active", alwaysActive=false})
+    local deck = shuffle(createDeck())
+    local ph, ah = {}, {}
     for i = 1, 7 do
-      table.insert(g.mh, table.remove(deck))
-      table.insert(g.uh, table.remove(deck))
+        ph[#ph+1] = table.remove(deck, 1)
+        ah[#ah+1] = table.remove(deck, 1)
     end
-    setState(tid, "special", "0")
-  end
-
-  -- Starting card (non-Wild)
-  local start
-  local attempts = 0
-  repeat
-    start = table.remove(deck)
-    attempts = attempts + 1
-    if attempts > 50 then start = "Red5"; break end
-  until cardColor(start) ~= "Wild"
-
-  g.deck  = deck
-  g.top   = start
-  g.col   = cardColor(start)
-  g.turn  = "user"
-  g.stk   = 0
-  g.uno   = false
-  g.active= true
-  return special
+    -- First card must be a number card (not wild)
+    local top, idx = nil, 1
+    while idx <= #deck do
+        local c, v = parseCard(deck[idx])
+        if c ~= "any" and tonumber(v) then
+            top = table.remove(deck, idx); break
+        end
+        idx = idx + 1
+    end
+    if not top then top = table.remove(deck, 1) end
+    local tc = parseCard(top)
+    setChatVar(triggerId, "cv_phase",         "playing")
+    setChatVar(triggerId, "cv_draw_pile",     s(deck))
+    setChatVar(triggerId, "cv_top_card",      top)
+    setChatVar(triggerId, "cv_current_color", tc == "any" and "red" or tc)
+    setChatVar(triggerId, "cv_player_hand",   s(ph))
+    setChatVar(triggerId, "cv_ai_hand",       s(ah))
+    setChatVar(triggerId, "cv_ai_count",      tostring(#ah))
+    setChatVar(triggerId, "cv_turn",          "player")
+    setChatVar(triggerId, "cv_message",       "게임 시작! 첫 카드: " .. cardName(top))
+    setChatVar(triggerId, "cv_uno_call",      "0")
+    setChatVar(triggerId, "cv_choose_color",  "0")
+    setChatVar(triggerId, "cv_last_action",   "game_start")
+    setChatVar(triggerId, "cv_draw_curse",    "")
+    setChatVar(triggerId, "cv_curse_attempts","0")
+    setChatVar(triggerId, "cv_uno_pending",   "0")
+    saveUI(triggerId)
+    savePanel(triggerId)
 end
 
--- ========== FIX8: 1% 특수 이벤트 자동 처리 ==========
-local function autoPlaySpecialEvent(tid, g)
-  -- FIX8: 특수 이벤트 자동 처리 — 유저 드로우 카드 연쇄 → 미쿠 대량 드로우 → 유저 Green8 피니시
-  -- 원래 유저 패(13장)와 미쿠 패(1장)를 state에 저장 (UI 표시용)
-  setState(tid, "ev_cards", ser(g.uh))
-  setState(tid, "ev_miku_card", ser(g.mh))
-
-  local totalDrawn = 0
-  -- 드로우 카드들 먼저 처리 (Green8 제외한 12장)
-  while #g.uh > 1 do
-    local foundDraw = nil
-    for i, c in ipairs(g.uh) do
-      if isDraw(c) then foundDraw = i; break end
-    end
-    if not foundDraw then break end
-    local c = table.remove(g.uh, foundDraw)
-    g.top = c
-    g.col = cardColor(c)
-    if g.col == "Wild" then g.col = "Green" end
-    totalDrawn = totalDrawn + drawAmt(c)
-  end
-
-  -- 미쿠가 드로우 스택 전부 받기
-  drawCards(g.deck, g.mh, totalDrawn)
-  g.stk = 0
-
-  -- Green8 마무리
-  for i, c in ipairs(g.uh) do
-    if c == "Green8" then
-      table.remove(g.uh, i)
-      g.top = "Green8"
-      g.col = "Green"
-      break
-    end
-  end
-
-  -- 시리즈 즉시 종료
-  g.active = false
-  g.us = 2  -- 유저 즉시 승리
-  g.winner = "user"
-  g.said = pick("event_collapse")
-  saveG(tid, g)
-  setState(tid, "said", g.said)
-  setState(tid, "winner", "user")
-end
-
--- ========== ROUND/SERIES END ==========
-local function handleRoundEnd(tid, g, winner)
-  g.active = false
-  if winner == "miku" then
-    g.ms = g.ms + 1
-    saveG(tid, g)
-    if g.ms >= 2 then
-      g.said = pick("swon")
-      setState(tid, "said", g.said)
-      setState(tid, "winner", "miku")
-      alertNormal(tid, "🏆 게임 종료!\n\n🎤 미쿠 승리!\n\n벌칙을 수행하세요 ♡")
+-- ========== CHECK WIN ==========
+local function checkWin(triggerId, who, hand)
+    if #hand > 0 then return false end
+    local wp = tonumber(getChatVar(triggerId, "cv_wins_player") or "0")
+    local wa = tonumber(getChatVar(triggerId, "cv_wins_ai")     or "0")
+    if who == "player" then
+        wp = wp + 1
+        setChatVar(triggerId, "cv_wins_player", tostring(wp))
+        setChatVar(triggerId, "cv_message", "🎉 이겼다! (" .. wp .. "승 : " .. wa .. "승)")
     else
-      g.said = pick("rwon")
-      setState(tid, "said", g.said)
-      alertNormal(tid, string.format("라운드 %d — 미쿠 승리! (미쿠 %d : %d 유저)\n다음 라운드 시작!", g.rnd, g.ms, g.us))
-      g.rnd = g.rnd + 1
-      initRound(tid, g)
-      saveG(tid, g)
+        wa = wa + 1
+        setChatVar(triggerId, "cv_wins_ai", tostring(wa))
+        setChatVar(triggerId, "cv_message", "😭 졌다... (" .. wp .. "승 : " .. wa .. "승)")
     end
-  else
-    g.us = g.us + 1
-    saveG(tid, g)
-    if g.us >= 2 then
-      g.said = pick("slose")
-      setState(tid, "said", g.said)
-      setState(tid, "winner", "user")
-      alertNormal(tid, "🏆 게임 종료!\n\n유저 승리!\n\n미쿠가 벌칙을 수행합니다 ♡\n으아아아아앙앙~!!!")
+    local prevUI    = getChatVar(triggerId, "cv_game_html") or ""
+    local isMatchEnd = (wp >= 2 or wa >= 2)
+    if isMatchEnd then
+        setChatVar(triggerId, "cv_phase",       "match_end")
+        setChatVar(triggerId, "cv_winner",      wp >= 2 and "player" or "ai")
+        setChatVar(triggerId, "cv_last_action", wp >= 2 and "match_win_player" or "match_win_ai")
     else
-      g.said = pick("rlose")
-      setState(tid, "said", g.said)
-      alertNormal(tid, string.format("라운드 %d — 유저 승리! (미쿠 %d : %d 유저)\n다음 라운드 시작!", g.rnd, g.ms, g.us))
-      g.rnd = g.rnd + 1
-      initRound(tid, g)
-      saveG(tid, g)
+        local gn = tonumber(getChatVar(triggerId, "cv_game_num") or "1") + 1
+        setChatVar(triggerId, "cv_game_num",      tostring(gn))
+        setChatVar(triggerId, "cv_round_winner",  who)
+        setChatVar(triggerId, "cv_last_action",   who == "player" and "round_win_player" or "round_win_ai")
+        setChatVar(triggerId, "cv_phase",         "between_games")
     end
-  end
-end
-
--- ========== CARD DISPLAY HELPERS ==========
-local clsMap = {Red="r", Blue="b", Green="g", Yellow="y", Wild="w"}
-local emoMap  = {Red="🔴", Blue="🔵", Green="🟢", Yellow="🟡"}
-
-local function cardLabel(c)
-  local co = cardColor(c)
-  local v  = cardVal(c)
-  if co == "Wild" then
-    return (v == "WildDraw4") and "W+4" or "Wild"
-  end
-  local em = emoMap[co] or co
-  if v == "Skip"    then return em.."⊘"
-  elseif v == "Reverse" then return em.."↺"
-  elseif v == "Draw2"   then return em.."+2"
-  else return em..v end
-end
-
-local function cardCls(c)
-  return clsMap[cardColor(c)] or "w"
-end
-
--- ========== HTML UI BUILDER ==========
--- FIX7: All CSS class names prefixed with x-risu- to match DOMPurify's automatic
--- class-name prefixing (parser.svelte.ts prefixes every class with "x-risu-").
-local CSS = [[<style>
-.x-risu-uu{font-family:'Segoe UI',sans-serif;background:linear-gradient(160deg,#0f0c29,#1a1a4e,#16213e);border-radius:14px;padding:12px 14px;color:#fff;max-width:500px;margin:8px auto;box-shadow:0 6px 24px rgba(0,0,0,.65);border:1px solid rgba(255,255,255,.07)}
-.x-risu-uscr{text-align:center;padding:4px 8px;background:rgba(255,255,255,.06);border-radius:8px;font-size:.78em;color:#c0c8e8;margin-bottom:7px;border:1px solid rgba(255,255,255,.07)}
-.x-risu-ubdg{display:inline-block;padding:1px 8px;border-radius:12px;font-size:.7em;font-weight:700;vertical-align:middle}
-.x-risu-ubdg.x-risu-m{background:#e91e8c;color:#fff}.x-risu-ubdg.x-risu-u{background:#00bcd4;color:#111}
-.x-risu-ubbl{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.13);border-radius:9px;padding:7px 12px;margin-bottom:7px;font-size:.88em;line-height:1.5}
-.x-risu-ulbl{font-size:.7em;color:#6870a0;margin:5px 0 2px;text-transform:uppercase;letter-spacing:.06em}
-.x-risu-uhnd{display:flex;flex-wrap:wrap;gap:3px;padding:5px;background:rgba(0,0,0,.18);border-radius:9px;min-height:54px;align-items:center}
-.x-risu-uc{display:inline-flex;align-items:center;justify-content:center;width:34px;height:50px;border-radius:5px;font-weight:900;font-size:.8em;box-shadow:2px 3px 6px rgba(0,0,0,.45);border:2px solid rgba(255,255,255,.18);cursor:default;user-select:none;text-align:center;padding:0;background:none}
-.x-risu-uc.x-risu-r{background:#d32f2f;color:#fff}.x-risu-uc.x-risu-b{background:#1565c0;color:#fff}.x-risu-uc.x-risu-g{background:#2e7d32;color:#fff}.x-risu-uc.x-risu-y{background:#f9a825;color:#111}
-.x-risu-uc.x-risu-w{background:linear-gradient(135deg,#d32f2f 0%,#f9a825 33%,#2e7d32 66%,#1565c0 100%);color:#fff}
-.x-risu-uc.x-risu-bk{background:linear-gradient(135deg,#181848,#2a2a6e);color:#889;font-size:.6em}
-.x-risu-umid{display:flex;gap:8px;align-items:center;margin:5px 0;padding:7px;background:rgba(255,255,255,.03);border-radius:9px;border:1px solid rgba(255,255,255,.05)}
-.x-risu-ustk{text-align:center;font-size:.72em;color:#ff7070;margin-top:3px;padding:3px;background:rgba(255,80,80,.08);border-radius:5px}
-.x-risu-uft{text-align:center;font-size:.67em;color:#3a4070;margin-top:5px;font-style:italic}
-.x-risu-ubtn{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:6px;color:#fff;padding:4px 10px;cursor:pointer;font-size:.78em;font-weight:700;margin:2px}
-</style>]]
-
-local function buildUI(g)
-  local h = {CSS}
-  local isMiku = (g.turn == "miku")
--- FIX7: x-risu- prefix on class names to match DOMPurify's auto-prefixing.
--- padding:0;background:none on x-risu-uc resets browser UA defaults for <button> elements.
-  local badge  = isMiku
-    and '<span class="x-risu-ubdg x-risu-m">미쿠 턴</span>'
-    or  '<span class="x-risu-ubdg x-risu-u">내 턴</span>'
-
-  local cdot = ({Red="🔴",Blue="🔵",Green="🟢",Yellow="🟡"})[g.col] or ""
-
-  -- Score / status bar
-  table.insert(h, string.format(
-    '<div class="x-risu-uu"><div class="x-risu-uscr">🃏 미쿠 <b>%d</b> : <b>%d</b> 유저 &nbsp;|&nbsp; Round %d &nbsp;|&nbsp; %s &nbsp;|&nbsp; %s %s</div>',
-    g.ms, g.us, g.rnd, badge, cdot, g.col
-  ))
-
-  -- Miku speech bubble
-  table.insert(h, string.format('<div class="x-risu-ubbl">😆 <b>미쿠:</b> %s</div>', g.said))
-
-  -- Miku hand (face-down)
-  table.insert(h, '<div class="x-risu-ulbl">미쿠 패</div><div class="x-risu-uhnd">')
-  for i = 1, #g.mh do
-    table.insert(h, '<span class="x-risu-uc x-risu-bk">UNO</span>')
-  end
-  table.insert(h, string.format(
-    '<small style="color:#909;margin-left:4px">%d장</small></div>', #g.mh
-  ))
-
-  -- Middle: discard pile + draw button
-  local topLbl = cardLabel(g.top)
-  local topCls = cardCls(g.top)
-  table.insert(h, string.format(
-    '<div class="x-risu-umid"><span style="font-size:.68em;color:#6870a0">버린 카드</span> <span class="x-risu-uc x-risu-%s">%s</span><div style="flex:1"></div>',
-    topCls, topLbl
-  ))
-  if not isMiku then
-    -- FIX7: raw risu-btn attribute routes click through runLuaButtonTrigger → onButtonClick
-    table.insert(h, string.format(
-      '<button class="x-risu-ubtn" risu-btn="drawCard">🂠 뽑기(%d장)</button>', #g.deck
-    ))
-  else
-    table.insert(h, string.format(
-      '<span style="font-size:.7em;color:#889">덱 %d장</span>', #g.deck
-    ))
-  end
-  table.insert(h, '</div>')
-
-  -- User hand
-  table.insert(h, string.format(
-    '<div class="x-risu-ulbl">내 패 (%d장)</div><div class="x-risu-uhnd">',
-    #g.uh
-  ))
-  if not isMiku then
-    for i, c in ipairs(g.uh) do
-      local lbl = cardLabel(c)
-      local cls = cardCls(c)
-      local playable = canPlay(c, g.top, g.col)
-        and (g.stk == 0 or isDraw(c))
-        and not (#g.uh == 1 and isAction(c))
-      if playable then
-        -- FIX7: button styled as a card; risu-btn dispatches to onButtonClick
-        table.insert(h, string.format(
-          '<button class="x-risu-uc x-risu-%s" risu-btn="playCard_%d" style="cursor:pointer">%s</button>',
-          cls, i-1, lbl
-        ))
-      else
-        table.insert(h, string.format(
-          '<span class="x-risu-uc x-risu-%s" style="opacity:.3">%s</span>', cls, lbl
-        ))
-      end
+    -- Build result overlay
+    local titleCls, titleTxt, subTxt, iconHTML
+    if isMatchEnd then
+        if who == "player" then
+            titleCls = "uro-title-win";  titleTxt = "최종 승리!";  iconHTML = '<div class="uro-icon">🏆</div>'
+            subTxt = "벌칙 RP 후 하단 버튼으로 재도전"
+        else
+            titleCls = "uro-title-lose"; titleTxt = "최종 패배";   iconHTML = '<div class="uro-icon">😤</div>'
+            subTxt = "벌칙 RP 후 하단 버튼으로 재도전"
+        end
+    else
+        local roundNum = tostring(tonumber(getChatVar(triggerId, "cv_game_num") or "1") - 1)
+        if who == "player" then
+            titleCls = "uro-title-win";  titleTxt = roundNum .. "판 승리!"; iconHTML = '<div class="uro-icon">🎉</div>'
+            subTxt = "하단 버튼을 눌러 다음 판을 시작하세요"
+        else
+            titleCls = "uro-title-lose"; titleTxt = roundNum .. "판 패배";  iconHTML = '<div class="uro-icon">😤</div>'
+            subTxt = "하단 버튼을 눌러 다음 판을 시작하세요"
+        end
     end
-  else
-    table.insert(h, '<span style="font-size:.78em;color:#6870a0">미쿠가 생각 중...♡</span>')
-  end
-  table.insert(h, '</div>')
-
-  -- UNO declaration button
-  if not isMiku and #g.uh == 1 and not g.uno then
-    -- FIX7: risu-btn for Lua dispatch
-    table.insert(h, '<br><button class="x-risu-ubtn" risu-btn="declareUno">🎴 UNO!</button>')
-  end
-
-  -- Draw stack warning
-  if g.stk > 0 then
-    table.insert(h, string.format(
-      '<div class="x-risu-ustk">⚠️ 드로우 스택 <b>+%d</b> — 드로우 카드로 맞받거나 뽑기!</div>',
-      g.stk
-    ))
-  end
-
-  table.insert(h, '<div class="x-risu-uft">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>')
-  return table.concat(h)
-end
-
--- ========== FIX8: 특수 이벤트 CSS + UI 빌더 ==========
-local CSS_ANIM = [[<style>
-@keyframes x-risu-shake{0%,100%{transform:translateX(0)}10%,30%,50%,70%,90%{transform:translateX(-4px)}20%,40%,60%,80%{transform:translateX(4px)}}
-@keyframes x-risu-cardfall{0%{opacity:0;transform:translateY(-30px) rotate(-5deg)}100%{opacity:1;transform:translateY(0) rotate(0)}}
-@keyframes x-risu-fadein{0%{opacity:0}100%{opacity:1}}
-.x-risu-evshake{animation:x-risu-shake .5s ease-in-out}
-.x-risu-evcard{animation:x-risu-cardfall .4s ease-out both}
-.x-risu-evmsg{animation:x-risu-fadein .6s ease-in both}
-</style>]]
-
-local function buildSpecialEventUI(g, evCards, mikuCard, collapseSaid, smugSaid)
-  -- evCards: 유저의 원래 13장 패 (table), mikuCard: 미쿠의 1장 패 (table)
-  local h = {CSS, CSS_ANIM}
-
-  table.insert(h, '<div class="x-risu-uu">')
-
-  -- Phase 1: 미쿠 기고만장
-  table.insert(h, '<div class="x-risu-evmsg" style="animation-delay:0s;padding:10px 0 6px">')
-  table.insert(h, '<div style="font-size:.8em;color:#ff9ecc;font-weight:bold;margin-bottom:4px">🌟 [1% 특수 이벤트]</div>')
-  table.insert(h, string.format('<div class="x-risu-ubbl">😆 <b>미쿠:</b> %s</div>', smugSaid))
-  table.insert(h, '<div class="x-risu-ulbl">미쿠 패 (1장)</div><div class="x-risu-uhnd">')
-  for _, c in ipairs(mikuCard) do
-    table.insert(h, string.format('<span class="x-risu-uc x-risu-%s">%s</span>', cardCls(c), cardLabel(c)))
-  end
-  table.insert(h, '</div></div>')
-
-  -- Phase 2: 유저 카드 13장 쏟아짐 (CSS shake + cardfall)
-  table.insert(h, '<div class="x-risu-evshake" style="animation-delay:.8s;padding:6px 0">')
-  table.insert(h, '<div class="x-risu-ulbl">유저 패 쏟아짐! (13장)</div><div class="x-risu-uhnd">')
-  for i, c in ipairs(evCards) do
-    local delay = string.format("calc(.8s + %d*0.1s)", i - 1)
-    table.insert(h, string.format(
-      '<span class="x-risu-uc x-risu-evcard x-risu-%s" style="animation-delay:%s">%s</span>',
-      cardCls(c), delay, cardLabel(c)
-    ))
-  end
-  table.insert(h, '</div></div>')
-
-  -- Phase 3: 미쿠 붕괴
-  table.insert(h, '<div class="x-risu-evmsg" style="animation-delay:2.2s;padding:6px 0">')
-  table.insert(h, string.format('<div class="x-risu-ubbl">😱 <b>미쿠:</b> %s</div>', collapseSaid))
-  -- game-over 패널
-  table.insert(h, string.format(
-    '<div style="background:rgba(0,188,212,.08);border:1px solid rgba(0,188,212,.25);border-radius:9px;padding:10px;text-align:center;margin-top:6px">'..
-    '<div style="font-size:1.2em;font-weight:900">🏆 유저 승리!</div>'..
-    '<div style="font-size:.82em;color:#c0c8e8;margin:4px 0">미쿠 %d : %d 유저</div>'..
-    '<div style="font-size:.75em;color:#e91e8c;font-weight:bold">미쿠가 벌칙을 수행합니다 ♡</div>'..
-    '</div>',
-    g.ms, g.us
-  ))
-  table.insert(h, '</div>')
-
-  table.insert(h, '<div class="x-risu-uft">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>')
-  return table.concat(h)
-end
-
--- ========== CORE PLAY CARD ==========
-local function doPlay(tid, cardIdx)
-  local g = loadG(tid)
-  if not g.active then
-    alertNormal(tid, "/start 를 입력해서 게임을 시작하세요!")
-    return
-  end
-  if g.turn ~= "user" then
-    alertNormal(tid, "미쿠의 턴이에요~ 기다려♡")
-    return
-  end
-  if cardIdx < 0 or cardIdx >= #g.uh then return end
-
-  local c = g.uh[cardIdx + 1]
-
-  -- Draw stack constraint
-  if g.stk > 0 and not isDraw(c) then
-    alertNormal(tid, string.format(
-      "드로우 스택 +%d 중! 드로우 카드를 내거나 뽑기 버튼을 누르세요.", g.stk
-    ))
-    return
-  end
-
-  -- Validity check
-  if not canPlay(c, g.top, g.col) then
-    g.said = "그 카드는 못 내~♡ 색이나 숫자를 맞춰봐♡"
-    saveG(tid, g)
-    return
-  end
-
-  -- House rule: cannot finish with action card
-  if #g.uh == 1 and isAction(c) then
-    alertNormal(tid, "하우스 룰: 마지막 카드는 숫자 카드여야 해요! 액션 카드로는 끝낼 수 없어요.")
-    return
-  end
-
-  -- Play the card
-  table.remove(g.uh, cardIdx + 1)
-  g.top = c
-  g.col = cardColor(c)
-  g.uno = false
-
-  -- Wild: ask for color
-  if g.col == "Wild" then
-    local ch = alertInput(tid, "색상을 선택하세요:\nred  /  blue  /  green  /  yellow")
-    local cm = {red="Red",r="Red",blue="Blue",b="Blue",green="Green",g="Green",yellow="Yellow",y="Yellow"}
-    g.col = cm[(ch or ""):lower():match("^%s*(.-)%s*$")] or "Red"
-  end
-
-  -- Apply effect
-  local v = cardVal(c)
-  if v == "Draw2" then
-    g.stk = g.stk + 2
-    g.turn = "miku"
-  elseif v == "WildDraw4" then
-    g.stk = g.stk + 4
-    g.turn = "miku"
-  elseif v == "Skip" or v == "Reverse" then
-    -- 2-player: user goes again
-    g.said = "이건 반칙이잖아~!♡ 으으으..."
-    if #g.uh == 0 then
-      handleRoundEnd(tid, g, "user")
-      return
+    local scoreHTML = '<div class="uro-score">나 ' .. wp .. '승 : 미쿠 ' .. wa .. '승</div>'
+    local overlay = '<div class="uno-result-overlay">'
+        .. iconHTML
+        .. '<div class="uro-title ' .. titleCls .. '">' .. titleTxt .. '</div>'
+        .. scoreHTML
+        .. '<div class="uro-sub">' .. subTxt .. '</div>'
+        .. '</div>'
+    -- Inject overlay into last </div> of prevUI
+    local finalUI
+    if prevUI ~= "" then
+        local insertPos, searchFrom = nil, 1
+        while true do
+            local found = prevUI:find("</div>", searchFrom, true)
+            if not found then break end
+            insertPos = found; searchFrom = found + 1
+        end
+        if insertPos then
+            finalUI = prevUI:sub(1, insertPos - 1) .. overlay .. prevUI:sub(insertPos)
+        else
+            finalUI = '<div style="position:relative;">' .. overlay .. '</div>'
+        end
+    else
+        finalUI = '<div style="width:100%;max-width:640px;margin:0 auto 8px;padding:10px;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);border-radius:14px;position:relative;">' .. overlay .. '</div>'
     end
-    saveG(tid, g)
-    return
-  else
-    g.turn = "miku"
-  end
-
-  -- Check user win
-  if #g.uh == 0 then
-    handleRoundEnd(tid, g, "user")
-    return
-  end
-
-  -- Miku's turn
-  local mikuWon = mikuDoTurn(tid, g)
-  if mikuWon then
-    handleRoundEnd(tid, g, "miku")
-    return
-  end
-
-  -- If Miku got a skip/reverse against user (miku turn again)
-  if g.turn == "miku" then
-    mikuDoTurn(tid, g)
-    if #g.mh == 0 then
-      handleRoundEnd(tid, g, "miku")
-      return
-    end
-  end
-
-  g.turn = "user"
-  saveG(tid, g)
-  -- Inject context for AI narrative
-  setInput(tid, string.format(
-    "[게임] 유저가 %s를 냈습니다. 미쿠가 %s를 냈습니다. 미쿠 손패: %d장, 유저 손패: %d장. 현재 색상: %s. 미쿠 대사: %s",
-    c, g.top, #g.mh, #g.uh, g.col, g.said
-  ))
+    setChatVar(triggerId, "cv_game_html", finalUI)
+    savePanel(triggerId); saveStatus(triggerId)
+    return true
 end
 
--- ========== onInput ==========
+-- ========== AI TURN ==========
+local function processAI(triggerId)
+    local maxTurns = 8
+    local won      = false
+    local ah  = d(nvl(getChatVar(triggerId, "cv_ai_hand"),        ""))
+    local top = nvl(getChatVar(triggerId, "cv_top_card"),         "")
+    local cur = nvl(getChatVar(triggerId, "cv_current_color"),    "red")
+    local finalMsg    = ""
+    local finalAction = "ai_play"
+    local endTurn     = false
+    if #ah == 0 then won = true end
+
+    for _ = 1, maxTurns do
+        if won or getPhase(triggerId) ~= "playing" then break end
+        if #ah == 0 then won = true; break end
+        local ci, cc = aiPick(ah, top, cur)
+        if not ci then
+            drawCards(triggerId, ah, 1, true)
+            finalMsg    = "미쿠가 카드를 뽑았습니다."
+            finalAction = "ai_draw"
+            endTurn     = true; break
+        end
+        table.remove(ah, ci)
+        top = cc
+        local c, v     = parseCard(cc)
+        local msg      = "미쿠: " .. cardName(cc) .. " 사용!"
+        local action   = "ai_play"
+        local loopAgain = false
+        if c == "any" then
+            -- Choose best color for AI
+            local cnt = {red=0,yellow=0,green=0,blue=0}
+            for _, card in ipairs(ah) do
+                local ac = parseCard(card)
+                if cnt[ac] then cnt[ac] = cnt[ac] + 1 end
+            end
+            local best, bc = "red", -1
+            for col, n in pairs(cnt) do if n > bc then bc = n; best = col end end
+            cur = best
+            msg = msg .. " → " .. colorKr(best)
+            if v == "wild4" then
+                local p = d(getChatVar(triggerId, "cv_player_hand") or "")
+                drawCards(triggerId, p, 4, false)
+                setChatVar(triggerId, "cv_player_hand", s(p))
+                msg = msg .. " 플레이어 +4!"; action = "ai_wild4"
+            else
+                action = "ai_wild"
+            end
+        else
+            cur = c
+            if v == "draw2" then
+                local p = d(getChatVar(triggerId, "cv_player_hand") or "")
+                drawCards(triggerId, p, 2, false)
+                setChatVar(triggerId, "cv_player_hand", s(p))
+                msg = msg .. " 플레이어 +2!"; action = "ai_draw2"
+            elseif v == "skip" then
+                action = "ai_skip";    msg = msg .. " 플레이어 스킵!"; loopAgain = true
+            elseif v == "reverse" then
+                action = "ai_reverse"; msg = msg .. " (리버스=스킵)";  loopAgain = true
+            end
+        end
+        -- UNO check & 1% special event trigger
+        if #ah == 1 then
+            msg = msg .. " UNO!"; action = "ai_uno"
+            local curseCount = tonumber(getChatVar(triggerId, "cv_curse_attempts") or "0") or 0
+            curseCount = curseCount + 1
+            setChatVar(triggerId, "cv_curse_attempts", tostring(curseCount))
+            local existingCurse = getChatVar(triggerId, "cv_draw_curse") or ""
+            local roll = math.random(1, 100)
+            if curseCount >= 3 and roll == 1 and existingCurse ~= "ready" then
+                -- 1% event: replace top card with green number, give player all-draw-cards hand
+                local gn = {"green_1","green_2","green_3","green_5","green_6","green_7","green_9"}
+                top = gn[math.random(#gn)]; cur = "green"
+                setChatVar(triggerId, "cv_player_hand", CURSE_HAND)
+                setChatVar(triggerId, "cv_draw_curse", "ready")
+                loopAgain = false
+            end
+        end
+        finalMsg = msg; finalAction = action
+        if #ah == 0 then won = true; break end
+        if not loopAgain then endTurn = true; break end
+    end
+
+    if not endTurn and not won then endTurn = true end
+    setChatVar(triggerId, "cv_ai_hand",        s(ah))
+    setChatVar(triggerId, "cv_ai_count",       tostring(#ah))
+    setChatVar(triggerId, "cv_top_card",       top)
+    setChatVar(triggerId, "cv_current_color",  cur)
+    setChatVar(triggerId, "cv_message",        finalMsg)
+    setChatVar(triggerId, "cv_last_action",    finalAction)
+    if endTurn then
+        setChatVar(triggerId, "cv_turn",     "player")
+        setChatVar(triggerId, "cv_uno_call", "0")
+    end
+    if getPhase(triggerId) == "playing" then
+        if #ah == 0 then won = true end
+        saveUI(triggerId)
+    end
+    if won then
+        checkWin(triggerId, "ai", ah)
+    else
+        savePanel(triggerId); saveStatus(triggerId)
+    end
+    reloadDisplay(triggerId)
+end
+
+-- ========== PUBLIC GAME FUNCTIONS ==========
+
+function startGame(triggerId)
+    local phase = getPhase(triggerId)
+    if phase == "match_end" then
+        setChatVar(triggerId, "cv_wins_player", "0")
+        setChatVar(triggerId, "cv_wins_ai",     "0")
+        setChatVar(triggerId, "cv_game_num",    "1")
+    end
+    setChatVar(triggerId, "cv_last_action", "game_start")
+    startNewGame(triggerId)
+    savePanel(triggerId); saveStatus(triggerId)
+    addChat(triggerId, "char", "{STATUS_BAR}\n{UNO_GAME}\n{SIDE_PANEL}")
+    local len = getChatLength(triggerId)
+    if len and len > 0 then
+        setChatVar(triggerId, "cv_game_msg_idx", tostring(len - 1))
+    end
+    -- Re-save status after addChat so cv_bottom_ui is correctly set
+    saveStatus(triggerId)
+    reloadDisplay(triggerId)
+end
+
+function onStart(triggerId)
+    savePanel(triggerId); saveStatus(triggerId)
+    local phase = getPhase(triggerId)
+    upsertLocalLoreBook(triggerId, "curse_event_active", "", {key="curse_active", alwaysActive=false})
+    -- Recovery: if stuck in ai-turn or color-selection mode, reset to player turn
+    if phase == "playing" then
+        local turn   = getChatVar(triggerId, "cv_turn")          or "player"
+        local choose = getChatVar(triggerId, "cv_choose_color")  or "0"
+        if turn == "ai" or choose == "1" then
+            setChatVar(triggerId, "cv_turn",          "player")
+            setChatVar(triggerId, "cv_choose_color",  "0")
+            saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId)
+            reloadDisplay(triggerId)
+        end
+    end
+end
+
 function onInput(triggerId)
-  -- Wrap entire handler in pcall so any runtime error does not silently
-  -- prevent game startup (e.g. json.decode crash on fresh chat state).
-  pcall(function()
+    local raw = getInput(triggerId) or ""
+    local inp = raw:lower():match("^%s*(.-)%s*$")
+    if inp == "/start" then
+        stopChat(triggerId)
+        startGame(triggerId)
+    end
+end
 
-  local raw = getInput(triggerId) or ""
-  local inp = raw:lower():match("^%s*(.-)%s*$")
-
-  -- /start command
-  -- NOTE: stopChat() is intentionally NOT called here.  Calling stopChat()
-  -- would prevent the AI from generating a response, meaning no new message
-  -- would be added to the chat, and therefore editDisplay would never fire to
-  -- attach the game UI.  Instead we inject a game-context message via
-  -- setInput() so the AI responds appropriately and editDisplay can render UI.
-  if inp == "/start" then
-    local g = loadG(triggerId)
-    g.ms = 0
-    g.us = 0
-    g.rnd = 1
-    g.said = "UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다♡ 시작할게~♡"
-    setState(triggerId, "winner", "")
-    local isSpecial = initRound(triggerId, g)
-    if isSpecial then
-      autoPlaySpecialEvent(triggerId, g)
-      setInput(triggerId, "[특수 이벤트] 1% 확률 이벤트 발동! 미쿠 패 1장에서 시작했으나 유저의 드로우 카드 연쇄로 미쿠가 대량 드로우! 유저 Green8으로 피니시! 미쿠 대붕괴! 시리즈 즉시 종료. 미쿠 대사: " .. g.said)
+function playCard(triggerId, idx)
+    if getPhase(triggerId) ~= "playing" then return end
+    local turn = nvl(getChatVar(triggerId, "cv_turn"), "player")
+    if turn ~= "player" then return end
+    local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
+    if choose == "1" then return end
+    local ph   = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    local card = ph[idx]
+    if not card then return end
+    local top = nvl(getChatVar(triggerId, "cv_top_card"),      "")
+    local cur = nvl(getChatVar(triggerId, "cv_current_color"), "red")
+    if not canPlay(card, top, cur) then
+        setChatVar(triggerId, "cv_message", "그 카드는 낼 수 없어요!")
+        saveUI(triggerId); reloadDisplay(triggerId); return
+    end
+    local unoCall = nvl(getChatVar(triggerId, "cv_uno_call"), "0")
+    table.remove(ph, idx)
+    setChatVar(triggerId, "cv_player_hand", s(ph))
+    setChatVar(triggerId, "cv_top_card",    card)
+    local c, v   = parseCard(card)
+    local msg    = "나: " .. cardName(card) .. " 사용!"
+    local action = "player_play"
+    local skipAI = false
+    -- 1% special event: playing green_8 when curse is "ready"
+    if card == "green_8" then
+        local curse = getChatVar(triggerId, "cv_draw_curse") or ""
+        if curse == "ready" then
+            setChatVar(triggerId, "cv_draw_curse", "end")
+            action = "curse_green8"
+            upsertLocalLoreBook(triggerId, "curse_event_active", CURSE_LORE,
+                {key="curse_active", alwaysActive=true})
+        end
+    end
+    if c == "any" then
+        setChatVar(triggerId, "cv_current_color", cur)
+        if v == "wild4" then
+            local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
+            drawCards(triggerId, ah, 4, true)
+            msg = msg .. " 미쿠 +4!"
+            if action ~= "curse_green8" then action = "player_wild4" end
+        else
+            if action ~= "curse_green8" then action = "player_wild" end
+        end
+        setChatVar(triggerId, "cv_message",     msg)
+        setChatVar(triggerId, "cv_last_action", action)
+        if #ph == 1 and unoCall == "0" then setChatVar(triggerId, "cv_uno_pending", "1") end
+        setChatVar(triggerId, "cv_uno_call", "0")
+        if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
+        setChatVar(triggerId, "cv_choose_color", "1")
+        setChatVar(triggerId, "cv_turn",         "player")
+        saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)
+        return
     else
-      saveG(triggerId, g)
-      setInput(triggerId, "[게임 시작] UNO 게임이 시작됐습니다! 미쿠 손패: " .. #g.mh .. "장, 유저 손패: " .. #g.uh .. "장. 미쿠 대사: " .. g.said)
+        setChatVar(triggerId, "cv_current_color", c)
+        if v == "skip" then
+            if action ~= "curse_green8" then action = "player_skip" end
+            msg = msg .. " 미쿠 스킵!"; skipAI = true
+        elseif v == "reverse" then
+            if action ~= "curse_green8" then action = "player_reverse" end
+            msg = msg .. " (리버스=스킵)"; skipAI = true
+        elseif v == "draw2" then
+            local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
+            drawCards(triggerId, ah, 2, true)
+            msg = msg .. " 미쿠 +2!"
+            if action ~= "curse_green8" then action = "player_draw2" end
+        end
     end
-    return
-  end
-
-  local g = loadG(triggerId)
-  if not g.active then return end
-
-  -- UNO declaration
-  if inp:find("^uno") or inp:find("유노") then
-    g.uno = true
-    g.said = "UNO 선언?♡ 귀엽긴 한데 내가 이겨♡"
-    saveG(triggerId, g)
-    setInput(triggerId, "[게임] 유저가 UNO를 선언했습니다! 미쿠: " .. g.said)
-    return
-  end
-
-  -- Draw
-  if inp == "draw" or inp == "pass" or inp:find("^드로우$") or inp:find("^뽑기$") or inp:find("카드 뽑기") then
-    if g.turn == "user" then
-      if g.stk > 0 then
-        drawCards(g.deck, g.uh, g.stk)
-        g.stk = 0
-        g.said = pick("win") .. " 드로우♡"
-      else
-        drawCards(g.deck, g.uh, 1)
-        g.said = "드로우~♡ 좋은 카드 나왔어?♡"
-      end
-      g.turn = "miku"
-      mikuDoTurn(triggerId, g)
-      if #g.mh == 0 then
-        handleRoundEnd(triggerId, g, "miku")
-        return
-      end
-      if g.turn == "miku" then g.turn = "user" end
-      saveG(triggerId, g)
-      setInput(triggerId, string.format(
-        "[게임] 유저가 카드를 뽑았습니다. 미쿠 손패: %d장, 유저 손패: %d장. 미쿠 대사: %s",
-        #g.mh, #g.uh, g.said
-      ))
+    setChatVar(triggerId, "cv_message",     msg)
+    setChatVar(triggerId, "cv_last_action", action)
+    if #ph == 1 and unoCall == "0" then setChatVar(triggerId, "cv_uno_pending", "1") end
+    setChatVar(triggerId, "cv_uno_call", "0")
+    if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
+    if skipAI then
+        setChatVar(triggerId, "cv_turn", "player")
+        saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)
+    else
+        setChatVar(triggerId, "cv_turn", "ai")
+        saveUI(triggerId); processAI(triggerId)
     end
-    return
-  end
-
-  -- Text-based card play
-  local colorKwds = {
-    ["빨강"]="Red",["빨간"]="Red",["red"]="Red",
-    ["파랑"]="Blue",["파란"]="Blue",["blue"]="Blue",
-    ["초록"]="Green",["초록색"]="Green",["green"]="Green",
-    ["노랑"]="Yellow",["노란"]="Yellow",["yellow"]="Yellow",
-    ["와일드"]="Wild",["wild"]="Wild"
-  }
-  local valKwds = {
-    ["0"]="0",["1"]="1",["2"]="2",["3"]="3",["4"]="4",
-    ["5"]="5",["6"]="6",["7"]="7",["8"]="8",["9"]="9",
-    ["스킵"]="Skip",["skip"]="Skip",
-    ["리버스"]="Reverse",["reverse"]="Reverse",["rev"]="Reverse",
-    ["+2"]="Draw2",["드로우2"]="Draw2",["draw2"]="Draw2",
-    ["+4"]="WildDraw4",["드로우4"]="WildDraw4",["draw4"]="WildDraw4",
-    ["wild draw 4"]="WildDraw4",["와일드 드로우"]="WildDraw4"
-  }
-
-  local fColor, fVal
-  for kw, co in pairs(colorKwds) do
-    if inp:find(kw, 1, true) then fColor = co; break end
-  end
-  for kw, v in pairs(valKwds) do
-    if inp:find(kw, 1, true) then fVal = v; break end
-  end
-
-  if fColor or fVal then
-    for i, c in ipairs(g.uh) do
-      local match = true
-      if fColor and cardColor(c) ~= fColor then match = false end
-      if fVal   and cardVal(c)   ~= fVal   then match = false end
-      if match then
-        doPlay(triggerId, i - 1)
-        return
-      end
-    end
-    alertNormal(triggerId, "그 카드가 손패에 없어요! 손패를 확인해주세요.")
-  end
-
-  end) -- end pcall
-  -- Errors are swallowed so the engine never crashes silently on bad state.
 end
 
--- ========== onOutput ==========
-function onOutput(triggerId)
-  local out = getOutput(triggerId) or ""
-  -- Remove broken tags
-  out = out:gsub("{AFF|[^}]*}", "")
-  out = out:gsub("{SIG|[^}]*}", "")
-  out = out:gsub("{null}", "")
-  out = out:gsub("{%u[%u_]*|[^}]*}", "")
-  -- Remove UNO_STATE blocks
-  out = out:gsub("%[UNO_STATE%][%s%S]-%[/UNO_STATE%]", "")
-  -- FIX8: bare null (줄 끝의 리터럴 "null" 텍스트)
-  out = out:gsub("%f[%a]null%f[%A]", "")
-  out = out:match("^%s*(.-)%s*$") or ""
-  if out == "" then out = " " end
-  setOutput(triggerId, out)
-end
-
--- ========== BUTTON HANDLERS ==========
 function drawCard(triggerId)
-  local g = loadG(triggerId)
-  if not g.active or g.turn ~= "user" then return end
-  local drawn = g.stk > 0 and g.stk or 1
-  if g.stk > 0 then
-    drawCards(g.deck, g.uh, g.stk)
-    g.stk = 0
-    g.said = pick("win") .. " 드로우~♡"
-  else
-    drawCards(g.deck, g.uh, 1)
-    g.said = "드로우~♡ 좋은 카드 나왔어?♡"
-  end
-  g.turn = "miku"
-  mikuDoTurn(triggerId, g)
-  if #g.mh == 0 then
-    handleRoundEnd(triggerId, g, "miku")
-    return
-  end
-  if g.turn == "miku" then g.turn = "user" end
-  saveG(triggerId, g)
-  -- Inject context for AI narrative
-  setInput(triggerId, string.format(
-    "[게임] 유저가 카드 %d장을 뽑았습니다. 미쿠 손패: %d장, 유저 손패: %d장. 미쿠 대사: %s",
-    drawn, #g.mh, #g.uh, g.said
-  ))
+    if getPhase(triggerId) ~= "playing" then return end
+    local turn = nvl(getChatVar(triggerId, "cv_turn"), "player")
+    if turn ~= "player" then return end
+    local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
+    if choose == "1" then return end
+    local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    drawCards(triggerId, ph, 1, false)
+    setChatVar(triggerId, "cv_player_hand", s(ph))
+    setChatVar(triggerId, "cv_message",     "카드를 1장 뽑았습니다.")
+    setChatVar(triggerId, "cv_last_action", "player_draw")
+    setChatVar(triggerId, "cv_uno_call",    "0")
+    setChatVar(triggerId, "cv_turn",        "ai")
+    saveUI(triggerId); processAI(triggerId)
 end
 
-function declareUno(triggerId)
-  local g = loadG(triggerId)
-  g.uno = true
-  g.said = "UNO 선언!♡ 귀엽긴 한데... 내가 이겨♡"
-  saveG(triggerId, g)
-  setInput(triggerId, "[게임] 유저가 UNO를 선언했습니다! 패가 1장 남았어요. 미쿠: " .. g.said)
+function callUno(triggerId)
+    if getPhase(triggerId) ~= "playing" then return end
+    setChatVar(triggerId, "cv_uno_call",    "1")
+    setChatVar(triggerId, "cv_last_action", "player_uno")
+    saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId)
+    reloadDisplay(triggerId)
 end
 
--- Generate playCard_0 .. playCard_19 dynamically
-for _i = 0, 19 do
-  local idx = _i
-  _G["playCard_" .. idx] = function(tid)
-    doPlay(tid, idx)
-  end
+function chooseColor(triggerId, color)
+    if getPhase(triggerId) ~= "playing" then return end
+    local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
+    if choose ~= "1" then return end
+    setChatVar(triggerId, "cv_current_color",  color)
+    setChatVar(triggerId, "cv_choose_color",   "0")
+    setChatVar(triggerId, "cv_last_action",    "color_chosen")
+    setChatVar(triggerId, "cv_message",        colorKr(color) .. " 선택!")
+    local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
+    setChatVar(triggerId, "cv_turn", "ai")
+    saveUI(triggerId); processAI(triggerId)
 end
 
--- ========== onButtonClick (FIX7: single router called by RisuAI for all risu-btn clicks) ==========
--- RisuAI calls onButtonClick(triggerId, buttonName) when a risu-btn element is clicked.
--- Unknown button names are silently ignored (no alert) to avoid disrupting gameplay.
-function onButtonClick(triggerId, btnName)
-  if btnName == "drawCard" then
-    drawCard(triggerId)
-  elseif btnName == "declareUno" then
-    declareUno(triggerId)
-  else
-    local idx = btnName:match("^playCard_(%d+)$")
-    if idx then
-      doPlay(triggerId, tonumber(idx))
+function penaltyCall(triggerId)
+    if getPhase(triggerId) ~= "playing" then return end
+    local unoPending = nvl(getChatVar(triggerId, "cv_uno_pending"), "0")
+    if unoPending ~= "1" then return end
+    local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    drawCards(triggerId, ph, 2, false)
+    setChatVar(triggerId, "cv_player_hand",  s(ph))
+    setChatVar(triggerId, "cv_uno_pending",  "0")
+    setChatVar(triggerId, "cv_message",      "UNO 미선언 패널티! 카드 2장 드로우")
+    setChatVar(triggerId, "cv_last_action",  "penalty")
+    saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId)
+    reloadDisplay(triggerId)
+end
+
+-- ========== BUTTON CLICK ROUTER ==========
+function onButtonClick(triggerId, btnValue)
+    if     btnValue == "uno-draw"    then drawCard(triggerId)
+    elseif btnValue == "uno-call"    then callUno(triggerId)
+    elseif btnValue == "penalty-call"then penaltyCall(triggerId)
+    elseif btnValue == "color-red"   then chooseColor(triggerId, "red")
+    elseif btnValue == "color-yellow"then chooseColor(triggerId, "yellow")
+    elseif btnValue == "color-green" then chooseColor(triggerId, "green")
+    elseif btnValue == "color-blue"  then chooseColor(triggerId, "blue")
+    elseif btnValue == "game-start"  then startGame(triggerId)
+    else
+        local idx = btnValue:match("^play%-(%d+)$")
+        if idx then playCard(triggerId, tonumber(idx)) end
     end
-  end
 end
-
--- ========== DISPLAY HOOK ==========
-listenEdit("editDisplay", function(triggerId, data)
-  -- PATCH: guard against non-string data (RisuAI may pass json-decoded value)
-  data = tostring(data or "")
-  -- PATCH: wrap callback body in pcall for graceful degradation on any error
-  local ok, result = pcall(function()
-    data = data:gsub("{AFF|[^}]*}", "")
-    data = data:gsub("{SIG|[^}]*}", "")
-    data = data:gsub("{null}", "")
-    data = data:gsub("{%u[%u_]*|[^}]*}", "") -- PATCH: broad pattern covers {BAT|..}, {FLOOR|..}, etc.
-    -- FIX8: bare null 제거
-    data = data:gsub("%f[%a]null%f[%A]", "")
-    data = data:match("^%s*(.-)%s*$") or ""
-    if data == "" then data = " " end
-    local g = loadG(triggerId)
-    -- FIX8: 특수 이벤트 UI (1% 이벤트 + 게임 종료)
-    local special = safeGetState(triggerId, "special")
-    if special == "1" and not g.active and g.winner == "user" then
-      local evCards  = des(safeGetState(triggerId, "ev_cards")     or "")
-      local mikuCard = des(safeGetState(triggerId, "ev_miku_card") or "")
-      local smugSaid = safeGetState(triggerId, "ev_smug") or D.event_smug[1]
-      local ui = buildSpecialEventUI(g, evCards, mikuCard, g.said, smugSaid)
-      return data .. "\n\n" .. ui
-    end
-    if not g.active then
-      -- Show game-over panel if series ended
-      if g.winner ~= "" then
-        local wonBy = g.winner == "miku" and "🎤 미쿠 승리" or "🏆 유저 승리"
-        local msg = g.winner == "miku"
-          and "벌칙을 수행하세요 ♡"
-          or "미쿠가 벌칙을 수행합니다 ♡"
-        local over = string.format(
-          '<div style="font-family:sans-serif;background:linear-gradient(160deg,#0f0c29,#1a1a4e);border-radius:14px;padding:16px;color:#fff;max-width:500px;margin:8px auto;text-align:center;border:2px solid rgba(255,255,255,.15)">'..
-          '<div style="font-size:1.4em;font-weight:900;margin-bottom:8px">%s</div>'..
-          '<div style="font-size:.9em;color:#c0c8e8;margin-bottom:6px">미쿠 %d : %d 유저</div>'..
-          '<div style="font-size:.85em;margin-bottom:8px">😆 미쿠: %s</div>'..
-          '<div style="font-size:.75em;color:#e91e8c;font-weight:bold">%s</div>'..
-          '<div style="font-size:.65em;color:#3a4070;margin-top:8px;font-style:italic">UN○를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다</div></div>',
-          wonBy, g.ms, g.us, g.said, msg
-        )
-        return data .. "\n\n" .. over
-      end
-      return data
-    end
-    local ui = buildUI(g)
-    return data .. "\n\n" .. ui
-  end)
-  -- FIX7: on error, include error message as HTML comment for debugging
-  if ok then
-    return result ~= nil and result or data
-  else
-    return data .. "<!-- LUA_ERR: " .. tostring(result) .. " -->"
-  end
-end)
-

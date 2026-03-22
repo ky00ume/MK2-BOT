@@ -158,22 +158,29 @@ local function des(s)
 end
 
 -- ========== STATE I/O ==========
+-- safeGetState: wraps getState in pcall so that json.decode(nil) on a fresh
+-- chat (no prior saved state) returns nil instead of throwing an error.
+local function safeGetState(tid, name)
+  local ok, val = pcall(getState, tid, name)
+  if ok then return val else return nil end
+end
+
 local function loadG(tid)
   return {
-    deck  = des(getState(tid,"deck")  or ""),
-    mh    = des(getState(tid,"mh")    or ""),
-    uh    = des(getState(tid,"uh")    or ""),
-    top   = getState(tid,"top")   or "",
-    col   = getState(tid,"col")   or "Red",
-    turn  = getState(tid,"turn")  or "user",
-    ms    = tonumber(getState(tid,"ms"))  or 0,
-    us    = tonumber(getState(tid,"us"))  or 0,
-    rnd   = tonumber(getState(tid,"rnd")) or 1,
-    active= (getState(tid,"active") == "1"),
-    uno   = (getState(tid,"uno")    == "1"),
-    stk   = tonumber(getState(tid,"stk")) or 0,
-    said  = getState(tid,"said")  or "♡",
-    winner= getState(tid,"winner") or ""
+    deck  = des(safeGetState(tid,"deck")  or ""),
+    mh    = des(safeGetState(tid,"mh")    or ""),
+    uh    = des(safeGetState(tid,"uh")    or ""),
+    top   = safeGetState(tid,"top")   or "",
+    col   = safeGetState(tid,"col")   or "Red",
+    turn  = safeGetState(tid,"turn")  or "user",
+    ms    = tonumber(safeGetState(tid,"ms"))  or 0,
+    us    = tonumber(safeGetState(tid,"us"))  or 0,
+    rnd   = tonumber(safeGetState(tid,"rnd")) or 1,
+    active= (safeGetState(tid,"active") == "1"),
+    uno   = (safeGetState(tid,"uno")    == "1"),
+    stk   = tonumber(safeGetState(tid,"stk")) or 0,
+    said  = safeGetState(tid,"said")  or "♡",
+    winner= safeGetState(tid,"winner") or ""
   }
 end
 
@@ -659,10 +666,19 @@ end
 
 -- ========== onInput ==========
 function onInput(triggerId)
+  -- Wrap entire handler in pcall so any runtime error does not silently
+  -- prevent game startup (e.g. json.decode crash on fresh chat state).
+  pcall(function()
+
   local raw = getInput(triggerId) or ""
   local inp = raw:lower():match("^%s*(.-)%s*$")
 
   -- /start command
+  -- NOTE: stopChat() is intentionally NOT called here.  Calling stopChat()
+  -- would prevent the AI from generating a response, meaning no new message
+  -- would be added to the chat, and therefore editDisplay would never fire to
+  -- attach the game UI.  Instead we inject a game-context message via
+  -- setInput() so the AI responds appropriately and editDisplay can render UI.
   if inp == "/start" then
     local g = loadG(triggerId)
     g.ms = 0
@@ -672,7 +688,7 @@ function onInput(triggerId)
     setState(triggerId, "winner", "")
     initRound(triggerId, g)
     saveG(triggerId, g)
-    stopChat(triggerId)
+    setInput(triggerId, "[게임 시작] UNO 게임이 시작됐습니다! 미쿠 손패: " .. #g.mh .. "장, 유저 손패: " .. #g.uh .. "장. 미쿠 대사: " .. g.said)
     return
   end
 
@@ -753,6 +769,9 @@ function onInput(triggerId)
     end
     alertNormal(triggerId, "그 카드가 손패에 없어요! 손패를 확인해주세요.")
   end
+
+  end) -- end pcall
+  -- Errors are swallowed so the engine never crashes silently on bad state.
 end
 
 -- ========== onOutput ==========

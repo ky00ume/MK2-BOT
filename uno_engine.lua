@@ -323,16 +323,11 @@ end
 local function saveBottomUI(triggerId)
     local phase = getPhase(triggerId)
     if phase == "playing" then
-        -- Only inject bottom-UI when the game message is NOT the last message
-        -- (prevents duplicating UI that is already shown via {UNO_GAME} placeholder)
-        local gameIdx = tonumber(nvl(getChatVar(triggerId, "cv_game_msg_idx"), "-1")) or -1
-        local chatLen = getChatLength(triggerId) or 0
-        if gameIdx >= 0 and (chatLen - 1) > gameIdx then
-            local gameHTML = getChatVar(triggerId, "cv_game_html") or ""
-            setChatVar(triggerId, "cv_bottom_ui", "\n" .. gameHTML)
-        else
-            setChatVar(triggerId, "cv_bottom_ui", "")
-        end
+        -- During active play the game UI is rendered exclusively via the {UNO_GAME}
+        -- placeholder on the game message (CBS 001_v001_UNO_GAME).  Injecting the
+        -- same HTML into cv_bottom_ui would create a second copy with identical
+        -- risu-btn identifiers, causing RisuAI to misroute button clicks (Bug A/B).
+        setChatVar(triggerId, "cv_bottom_ui", "")
         return
     end
     -- match_end / between_games: keep status bar + restart button visible under RP messages

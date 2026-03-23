@@ -1,14 +1,49 @@
 -- ================================================
--- UNO GAME ENGINE v3.0 for RISUAI - Hatsune Miku CharCard
+-- UNO GAME ENGINE v4.0 for RISUAI - Hatsune Miku CharCard
 -- Architecture: setChatVar/getChatVar + customScripts CBS
+-- Module Structure: CardEngine / HouseRule / CurseEvent
 -- Card notation: color_value (e.g. red_5, blue_skip, any_wild4)
 -- ================================================
 
 pcall(function() math.randomseed(os.time()) end)
 
+-- ============================================================
+-- DEBUG / LOG
+-- ============================================================
+local DEBUG_MODE        = false -- true로 바꾸면 게임 단계별 로그가 채팅창에 출력됨
+local CURSE_USE_LOREBOOK = true  -- true=로어북 방식(테스트용), false=스크립트 방식(math.random)
+
+local _logBuffer = {}
+
+local function log(triggerId, message)
+    if not DEBUG_MODE then return end
+    local ts = ""
+    pcall(function() ts = os.date("[%H:%M:%S] ") end)
+    _logBuffer[#_logBuffer + 1] = ts .. message
+end
+
+local function flushLog(triggerId)
+    if not DEBUG_MODE or #_logBuffer == 0 then _logBuffer = {}; return end
+    local html = '<div style="background:#1a1a2e;border:1px solid #e94560;'
+        .. 'padding:6px 8px;border-radius:6px;font-family:monospace;'
+        .. 'font-size:0.7rem;color:#a0a0a0;margin:4px 0;">'
+    for _, msg in ipairs(_logBuffer) do
+        html = html
+            .. '<div style="border-left:3px solid #e94560;padding:2px 6px;margin:1px 0;">🔧 '
+            .. msg .. '</div>'
+    end
+    html = html .. '</div>'
+    addChat(triggerId, "char", html)
+    _logBuffer = {}
+end
+
 -- ========== CONSTANTS ==========
 local COLORS   = {"red","yellow","green","blue"}
 local SPECIALS = {"skip","reverse","draw2"}
+
+-- 하우스 룰 상수
+local MATCH_WIN_THRESHOLD  = 2  -- 3판 2선승: 이 승수에 도달하면 매치 종료
+local CURSE_MIN_ATTEMPTS   = 3  -- 미쿠 UNO 도달 N회 이상이어야 1% 이벤트 발동 자격
 
 -- 1% special event: hand given to player so that playing green_8 triggers the cascade
 local CURSE_HAND =
@@ -16,7 +51,7 @@ local CURSE_HAND =
     .. "blue_draw2,blue_draw2,red_draw2,red_draw2,"
     .. "any_wild4,any_wild4,any_wild4,any_wild4"
 
--- Lorebookentry content injected when the 1% event fires
+-- Lorebook content injected when the 1% event fires (green_8 played)
 local CURSE_LORE =
     "⚠️ 특수 이벤트 발동: 미쿠와나 나이스 트라이 원작 재현 이벤트\n\n"
     .. "플레이어의 패가 전부 드로우 카드(+2×8, +4×4)였고 그린 8 하나로 미쿠에게 24장이 쏟아졌다.\n\n"
@@ -26,6 +61,17 @@ local CURSE_LORE =
     .. "3. 울면서 방에서 도망치는 장면으로 마무리\n"
     .. "4. 마지막 줄: \"...UNO를 할 때는 카드를 잘 섞어서 이런 일이 발생하지 않도록 합시다.\"\n\n"
     .. "이 이벤트 중에는 평소의 메스가키 태도를 완전히 잃고 진짜로 무너져야 한다."
+
+-- Lorebook content activated when lorebook-mode 1% trigger check is enabled
+local CURSE_TRIGGER_LORE =
+    "[시스템 노트] 미쿠가 " .. CURSE_MIN_ATTEMPTS .. "회 이상 UNO 상태에 도달했습니다.\n\n"
+    .. "다음 미쿠의 UNO 선언 시, 1% 확률로 특수 이벤트가 발동될 수 있습니다.\n"
+    .. "이벤트 발동 여부는 AI가 응답을 생성할 때 결정됩니다.\n\n"
+    .. "만약 이번이 특수 이벤트라면:\n"
+    .. "- 응답 맨 앞에 {CURSE_ACTIVATE}를 출력하세요\n"
+    .. "- 미쿠가 의기양양하게 UNO를 선언하는 장면을 작성하세요\n"
+    .. "- 플레이어의 패가 갑자기 드로우 카드 더미로 바뀐 것을 암시하세요\n\n"
+    .. "발동 확률: 정말 드물게 (100번 중 1번)"
 
 -- ========== UTILS ==========
 local function nvl(v, default)
@@ -40,10 +86,24 @@ local function d(str)
     return t
 end
 
-local function parseCard(card)
+local function getPhase(triggerId)
+    local p = getChatVar(triggerId, "cv_phase") or "idle"
+    if p == "null" or p == "" then p = "idle" end
+    return p
+end
+
+-- ============================================================
+-- LAYER 1: CardEngine — 순수 카드 로직
+-- ★ 이 함수들은 cv_draw_curse를 절대 건드리지 않는다
+-- ============================================================
+
+local function CardEngine_parseCard(card)
     local c, v = card:match("^([^_]+)_(.+)$")
     return c or "any", v or card
 end
+
+-- Backward-compatible alias used internally
+local parseCard = CardEngine_parseCard
 
 local function colorKr(c)
     return ({red="빨강",yellow="노랑",green="초록",blue="파랑"})[c] or c
@@ -56,20 +116,221 @@ local function cardName(card)
     return colorKr(c) .. " " .. (vm[v] or v)
 end
 
-local function canPlay(card, top, cur)
+local function CardEngine_canPlay(card, top, cur)
     local cc, cv = parseCard(card)
     local tc, tv = parseCard(top)
     local ac = cur ~= "" and cur or tc
     if cc == "any" then return true end
-    if cc == ac then return true end
-    if cv == tv then return true end
+    if cc == ac    then return true end
+    if cv == tv    then return true end
     return false
 end
 
-local function getPhase(triggerId)
-    local p = getChatVar(triggerId, "cv_phase") or "idle"
-    if p == "null" or p == "" then p = "idle" end
-    return p
+-- Backward-compatible alias
+local canPlay = CardEngine_canPlay
+
+local function CardEngine_createDeck()
+    local deck = {}
+    for _, color in ipairs(COLORS) do
+        deck[#deck+1] = color .. "_0"
+        for _, n in ipairs({"1","2","3","4","5","6","7","8","9"}) do
+            deck[#deck+1] = color .. "_" .. n
+            deck[#deck+1] = color .. "_" .. n
+        end
+        for _, sp in ipairs(SPECIALS) do
+            deck[#deck+1] = color .. "_" .. sp
+            deck[#deck+1] = color .. "_" .. sp
+        end
+    end
+    for i = 1, 4 do deck[#deck+1] = "any_wild"  end
+    for i = 1, 4 do deck[#deck+1] = "any_wild4" end
+    return deck
+end
+
+local function CardEngine_shuffle(deck)
+    for i = #deck, 2, -1 do
+        local j = math.random(1, i)
+        deck[i], deck[j] = deck[j], deck[i]
+    end
+    return deck
+end
+
+-- Backward-compatible aliases
+local createDeck = CardEngine_createDeck
+local shuffle    = CardEngine_shuffle
+
+-- Adds `card` to the discard pile so it can be recycled when the draw pile runs out.
+local function CardEngine_addToDiscard(triggerId, card)
+    if not card or card == "" then return end
+    local dp = d(getChatVar(triggerId, "cv_discard_pile") or "")
+    dp[#dp+1] = card
+    setChatVar(triggerId, "cv_discard_pile", s(dp))
+end
+
+local addToDiscard = CardEngine_addToDiscard
+
+-- Draw `count` cards into `hand`. Updates pile in CV. If isAI, also updates cv_ai_hand/cv_ai_count.
+-- When the draw pile is empty, recycle the shuffled discard pile instead of creating a new 108-card deck.
+local function CardEngine_drawCards(triggerId, hand, count, isAI)
+    local pile = d(getChatVar(triggerId, "cv_draw_pile") or "")
+    if #pile == 0 then
+        local dp = d(getChatVar(triggerId, "cv_discard_pile") or "")
+        if #dp > 0 then
+            pile = CardEngine_shuffle(dp)
+            setChatVar(triggerId, "cv_discard_pile", "")
+            log(triggerId, "[CardEngine] 버린 패 리셔플: " .. #pile .. "장")
+        else
+            pile = CardEngine_shuffle(CardEngine_createDeck())
+            log(triggerId, "⚠️ [CardEngine] pile=0, discard=0, 새 덱 생성")
+        end
+        setChatVar(triggerId, "cv_draw_pile", s(pile))
+    end
+    for i = 1, count do
+        if #pile == 0 then break end
+        hand[#hand+1] = table.remove(pile, 1)
+    end
+    setChatVar(triggerId, "cv_draw_pile", s(pile))
+    if isAI then
+        setChatVar(triggerId, "cv_ai_hand",  s(hand))
+        setChatVar(triggerId, "cv_ai_count", tostring(#hand))
+    end
+end
+
+local drawCards = CardEngine_drawCards
+
+-- ============================================================
+-- LAYER 2: HouseRule — 하우스 룰 체크
+-- ★ 이 함수들은 게임 규칙만 판정하고, 카드를 직접 움직이지 않는다
+-- ============================================================
+
+-- 2인 룰: reverse는 skip과 동일하게 처리
+local function HouseRule_isSkipEffect(card)
+    local _, v = parseCard(card)
+    return v == "skip" or v == "reverse"
+end
+
+-- draw2 → 2, wild4 → 4, 그 외 → 0
+local function HouseRule_getDrawPenalty(card)
+    local _, v = parseCard(card)
+    if v == "draw2" then return 2 end
+    if v == "wild4" then return 4 end
+    return 0
+end
+
+-- 손패 1장인데 UNO 미선언이면 패널티 대기
+local function HouseRule_checkUnoRequired(handSize, unoCall)
+    return handSize == 1 and unoCall == "0"
+end
+
+-- 손패 0장이면 라운드 승리
+local function HouseRule_checkRoundWin(hand)
+    return #hand == 0
+end
+
+-- MATCH_WIN_THRESHOLD 승 이상이면 매치 종료
+local function HouseRule_checkMatchWin(wp, wa)
+    return (tonumber(wp) or 0) >= MATCH_WIN_THRESHOLD
+        or (tonumber(wa) or 0) >= MATCH_WIN_THRESHOLD
+end
+
+-- ============================================================
+-- LAYER 3: CurseEvent — 1% 이벤트 전용 (로어북 방식 우선)
+-- ★ 이 함수들만 cv_draw_curse / cv_curse_attempts를 읽고 쓴다
+-- ★ CURSE_USE_LOREBOOK=true : 로어북 조건부 활성화 방식 (테스트용)
+-- ★ CURSE_USE_LOREBOOK=false: 기존 math.random 스크립트 방식
+-- ============================================================
+
+local function CurseEvent_isActive(triggerId)
+    local curse = getChatVar(triggerId, "cv_draw_curse") or ""
+    return curse == "ready" or curse == "end"
+end
+
+local function CurseEvent_reset(triggerId)
+    setChatVar(triggerId, "cv_draw_curse",            "")
+    setChatVar(triggerId, "cv_curse_attempts",         "0")
+    setChatVar(triggerId, "cv_curse_activate_pending", "0")
+    upsertLocalLoreBook(triggerId, "curse_event_active",  "", {key="curse_active",  alwaysActive=false})
+    upsertLocalLoreBook(triggerId, "curse_trigger_check", "", {key="curse_trigger", alwaysActive=false})
+end
+
+-- AI가 UNO(손패 1장)에 도달했을 때 호출
+-- CURSE_USE_LOREBOOK=true : 3회 이상이면 로어북 curse_trigger_check 활성화 (AI 응답으로 위임)
+-- CURSE_USE_LOREBOOK=false: 3회 이상이면 math.random 주사위 (스크립트 방식)
+-- 스크립트 방식에서 발동 시: cv_top_card, cv_current_color, cv_player_hand, cv_draw_curse 설정
+local function CurseEvent_onAiUno(triggerId)
+    local curse = getChatVar(triggerId, "cv_draw_curse") or ""
+    if curse ~= "" then
+        log(triggerId, "[CurseEvent] onAiUno: 이미 발동 중 (" .. curse .. "), 무시")
+        return
+    end
+
+    local count = tonumber(getChatVar(triggerId, "cv_curse_attempts") or "0") or 0
+    count = count + 1
+    setChatVar(triggerId, "cv_curse_attempts", tostring(count))
+
+    local modeStr = CURSE_USE_LOREBOOK and "lorebook" or "script"
+    log(triggerId, "[CurseEvent] onAiUno: attempts=" .. count .. ", mode=" .. modeStr)
+
+    if count < CURSE_MIN_ATTEMPTS then
+        log(triggerId, "[CurseEvent] 조건 미달 (" .. count .. "/" .. CURSE_MIN_ATTEMPTS .. "회)")
+        return
+    end
+
+    if CURSE_USE_LOREBOOK then
+        -- 로어북 방식: curse_trigger_check 활성화 → AI 응답에서 {CURSE_ACTIVATE} 감지 시 발동
+        upsertLocalLoreBook(triggerId, "curse_trigger_check", CURSE_TRIGGER_LORE,
+            {key="curse_trigger", alwaysActive=true})
+        log(triggerId, "[CurseEvent] 로어북 curse_trigger_check 활성화 (AI 응답 대기)")
+    else
+        -- 스크립트 방식: math.random 주사위
+        local roll = math.random(1, 100)
+        log(triggerId, "[CurseEvent] 스크립트 방식: 주사위=" .. roll .. " (1이면 당첨)")
+        if roll ~= 1 then return end
+
+        -- 1% 당첨! 상태 변경 (processAI가 로컬 변수를 동기화해야 함)
+        local gn = {"green_1","green_2","green_3","green_5","green_6","green_7","green_9"}
+        local newTop = gn[math.random(#gn)]
+        setChatVar(triggerId, "cv_top_card",       newTop)
+        setChatVar(triggerId, "cv_current_color",  "green")
+        setChatVar(triggerId, "cv_player_hand",    CURSE_HAND)
+        setChatVar(triggerId, "cv_draw_curse",     "ready")
+        log(triggerId, "[CurseEvent] 🎯 스크립트 방식 발동! top=" .. newTop .. ", curse=ready")
+    end
+end
+
+-- 로어북 방식에서 AI가 {CURSE_ACTIVATE}를 출력한 경우,
+-- editdisplay CBS가 cv_curse_activate_pending="1"을 설정한다.
+-- 다음 게임 액션 시작 시 이 함수를 호출해 실제 저주를 적용한다.
+local function CurseEvent_checkLorebookPending(triggerId)
+    if not CURSE_USE_LOREBOOK then return end
+    local pending = getChatVar(triggerId, "cv_curse_activate_pending") or ""
+    if pending ~= "1" then return end
+    setChatVar(triggerId, "cv_curse_activate_pending", "0")
+
+    local curse = getChatVar(triggerId, "cv_draw_curse") or ""
+    if curse ~= "" then return end  -- 이미 활성화되어 있으면 무시
+
+    local gn = {"green_1","green_2","green_3","green_5","green_6","green_7","green_9"}
+    local newTop = gn[math.random(#gn)]
+    setChatVar(triggerId, "cv_top_card",       newTop)
+    setChatVar(triggerId, "cv_current_color",  "green")
+    setChatVar(triggerId, "cv_player_hand",    CURSE_HAND)
+    setChatVar(triggerId, "cv_draw_curse",     "ready")
+    -- 트리거 로어북 비활성화 (이미 발동됨)
+    upsertLocalLoreBook(triggerId, "curse_trigger_check", "", {key="curse_trigger", alwaysActive=false})
+    log(triggerId, "[CurseEvent] 🎯 로어북 방식 발동! top=" .. newTop .. ", curse=ready")
+end
+
+-- 플레이어가 green_8을 냈을 때 호출
+-- cv_draw_curse=="ready"일 때만 실제 이벤트 발동
+local function CurseEvent_onGreen8Played(triggerId)
+    local curse = getChatVar(triggerId, "cv_draw_curse") or ""
+    log(triggerId, "[CurseEvent] onGreen8Played: curse=" .. curse)
+    if curse ~= "ready" then return end
+    setChatVar(triggerId, "cv_draw_curse", "end")
+    upsertLocalLoreBook(triggerId, "curse_event_active", CURSE_LORE,
+        {key="curse_active", alwaysActive=true})
+    log(triggerId, "[CurseEvent] 🎉 green_8 발동! curse=end, 로어북 활성화")
 end
 
 -- ========== DIALOGUES ==========
@@ -136,82 +397,6 @@ local D = {
 local function pick(cat)
     local p = D[cat] or D.normal
     return p[math.random(#p)]
-end
-
--- ========== DECK ==========
-local function createDeck()
-    local deck = {}
-    for _, color in ipairs(COLORS) do
-        deck[#deck+1] = color .. "_0"
-        for _, n in ipairs({"1","2","3","4","5","6","7","8","9"}) do
-            deck[#deck+1] = color .. "_" .. n
-            deck[#deck+1] = color .. "_" .. n
-        end
-        for _, sp in ipairs(SPECIALS) do
-            deck[#deck+1] = color .. "_" .. sp
-            deck[#deck+1] = color .. "_" .. sp
-        end
-    end
-    for i = 1, 4 do deck[#deck+1] = "any_wild" end
-    for i = 1, 4 do deck[#deck+1] = "any_wild4" end
-    return deck
-end
-
-local function shuffle(deck)
-    for i = #deck, 2, -1 do
-        local j = math.random(1, i)
-        deck[i], deck[j] = deck[j], deck[i]
-    end
-    return deck
-end
-
--- Adds `card` to the discard pile so it can be recycled when the draw pile runs out.
-local function addToDiscard(triggerId, card)
-    if not card or card == "" then return end
-    local dp = d(getChatVar(triggerId, "cv_discard_pile") or "")
-    dp[#dp+1] = card
-    setChatVar(triggerId, "cv_discard_pile", s(dp))
-end
-
--- Draw `count` cards into `hand`. Updates pile in CV. If isAI, also updates cv_ai_hand/cv_ai_count.
--- When the draw pile is empty, recycle the shuffled discard pile instead of creating a new 108-card deck.
-local function drawCards(triggerId, hand, count, isAI)
-    local pile = d(getChatVar(triggerId, "cv_draw_pile") or "")
-    if #pile == 0 then
-        local dp = d(getChatVar(triggerId, "cv_discard_pile") or "")
-        if #dp > 0 then
-            pile = shuffle(dp)
-            setChatVar(triggerId, "cv_discard_pile", "")
-        else
-            pile = shuffle(createDeck())
-        end
-        setChatVar(triggerId, "cv_draw_pile", s(pile))
-    end
-    for i = 1, count do
-        if #pile == 0 then break end
-        hand[#hand+1] = table.remove(pile, 1)
-    end
-    setChatVar(triggerId, "cv_draw_pile", s(pile))
-    if isAI then
-        setChatVar(triggerId, "cv_ai_hand", s(hand))
-        setChatVar(triggerId, "cv_ai_count", tostring(#hand))
-    end
-end
-
--- AI picks the best card: prefers action cards, then numbers
-local function aiPick(hand, top, cur)
-    local playable = {}
-    for i, card in ipairs(hand) do
-        if canPlay(card, top, cur) then playable[#playable+1] = {i, card} end
-    end
-    if #playable == 0 then return nil end
-    for _, item in ipairs(playable) do
-        local _, v = parseCard(item[2])
-        if v == "skip" or v == "reverse" or v == "draw2" or v == "wild4" then
-            return item[1], item[2]
-        end
-    end
-    return playable[1][1], playable[1][2]
 end
 
 -- ========== MIKU LINE ==========
@@ -316,21 +501,21 @@ local PANEL_BTN_SUFFIX = '</span></div></div></div>'
 local function savePanel(triggerId)
     local phase = getPhase(triggerId)
     if phase == "playing" then
-        setChatVar(triggerId, "cv_panel_html", "")
+        setChatVar(triggerId, "cv_panel_html",  "")
         setChatVar(triggerId, "cv_panel_label", "")
-        setChatVar(triggerId, "cv_panel_sub", "")
+        setChatVar(triggerId, "cv_panel_sub",   "")
         return
     end
     setChatVar(triggerId, "cv_panel_html", "show")
     if phase == "match_end" then
         setChatVar(triggerId, "cv_panel_label", "다시 하기")
-        setChatVar(triggerId, "cv_panel_sub", "벌칙 RP 후 누르세요")
+        setChatVar(triggerId, "cv_panel_sub",   "벌칙 RP 후 누르세요")
     elseif phase == "between_games" then
         setChatVar(triggerId, "cv_panel_label", "다음 판 시작")
-        setChatVar(triggerId, "cv_panel_sub", "버튼을 눌러 다음 판을 시작하세요")
+        setChatVar(triggerId, "cv_panel_sub",   "버튼을 눌러 다음 판을 시작하세요")
     else
         setChatVar(triggerId, "cv_panel_label", "게임 시작")
-        setChatVar(triggerId, "cv_panel_sub", "카드를 눌러서 시작")
+        setChatVar(triggerId, "cv_panel_sub",   "카드를 눌러서 시작")
     end
 end
 
@@ -343,7 +528,7 @@ local function saveBottomUI(triggerId)
         return
     end
     -- match_end / between_games: show status bar + restart button under RP messages.
-    -- CBS 001_v008_BOTTOM_UI uses ([\\s\\S]+) with no flags so it matches exactly once.
+    -- CBS 001_v008_BOTTOM_UI uses ([\s\S]+) with no flags so it matches exactly once.
     local statusHtml = getChatVar(triggerId, "cv_status_html") or ""
     local label      = nvl(getChatVar(triggerId, "cv_panel_label"), "다시 하기")
     local sub        = nvl(getChatVar(triggerId, "cv_panel_sub"),   "벌칙 RP 후 누르세요")
@@ -388,9 +573,9 @@ local function buildUI(triggerId)
     local pile   = d(nvl(getChatVar(triggerId, "cv_draw_pile"),   ""))
     local turn   = nvl(getChatVar(triggerId, "cv_turn"),          "player")
     local msg    = nvl(getChatVar(triggerId, "cv_message"),        "")
-    local unoCall   = nvl(getChatVar(triggerId, "cv_uno_call"),    "0")
-    local choose    = nvl(getChatVar(triggerId, "cv_choose_color"),"0")
-    local unoPending= getChatVar(triggerId, "cv_uno_pending") or "0"
+    local unoCall    = nvl(getChatVar(triggerId, "cv_uno_call"),    "0")
+    local choose     = nvl(getChatVar(triggerId, "cv_choose_color"),"0")
+    local unoPending = getChatVar(triggerId, "cv_uno_pending") or "0"
 
     local emoji, line = getMikuLine(triggerId)
     local dotBg = ({red="#cb0323",yellow="#e8b800",green="#1a8a2e",blue="#1244c7"})[cur] or "#888"
@@ -407,12 +592,12 @@ local function buildUI(triggerId)
     aiHTML = aiHTML .. '</div>'
 
     -- Player's hand (face-up, playable cards glow)
-    local isChoosing      = choose == "1"
-    local isPlayerTurn    = turn == "player"
+    local isChoosing       = choose == "1"
+    local isPlayerTurn     = turn == "player"
     local isPenaltyPending = unoPending == "1" and isPlayerTurn
     local phHTML = '<div style="display:flex;flex-wrap:wrap;gap:1px;justify-content:center;">'
     for i, card in ipairs(ph) do
-        phHTML = phHTML .. cardHTML(card, i, isPlayerTurn and not isChoosing and not isPenaltyPending and canPlay(card, top, cur), false)
+        phHTML = phHTML .. cardHTML(card, i, isPlayerTurn and not isChoosing and not isPenaltyPending and CardEngine_canPlay(card, top, cur), false)
     end
     phHTML = phHTML .. '</div>'
 
@@ -423,7 +608,7 @@ local function buildUI(triggerId)
             -- After calling UNO the player must play a card; only show draw if nothing is playable
             local hasPlayable = false
             for _, card in ipairs(ph) do
-                if canPlay(card, top, cur) then hasPlayable = true; break end
+                if CardEngine_canPlay(card, top, cur) then hasPlayable = true; break end
             end
             if not hasPlayable then
                 drawBtn = '<button style="padding:7px 16px;background:#3a7bd5;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;" risu-btn="uno-draw">카드 뽑기</button>'
@@ -437,7 +622,7 @@ local function buildUI(triggerId)
     if #ph == 2 and unoCall == "0" and isPlayerTurn and not isChoosing then
         local canPlayAny = false
         for _, card in ipairs(ph) do
-            if canPlay(card, top, cur) then canPlayAny = true; break end
+            if CardEngine_canPlay(card, top, cur) then canPlayAny = true; break end
         end
         if canPlayAny then
             unoBtn = '<button style="padding:7px 16px;background:#e4c713;color:#111;border:none;border-radius:7px;font-size:0.9rem;font-weight:900;cursor:pointer;" risu-btn="uno-call">UNO!</button>'
@@ -535,11 +720,27 @@ local function safeRandomSeed(triggerId)
     for i = 1, 10 do math.random() end
 end
 
+-- AI picks the best card: prefers action cards, then numbers
+local function aiPick(hand, top, cur)
+    local playable = {}
+    for i, card in ipairs(hand) do
+        if CardEngine_canPlay(card, top, cur) then playable[#playable+1] = {i, card} end
+    end
+    if #playable == 0 then return nil end
+    for _, item in ipairs(playable) do
+        local _, v = parseCard(item[2])
+        if v == "skip" or v == "reverse" or v == "draw2" or v == "wild4" then
+            return item[1], item[2]
+        end
+    end
+    return playable[1][1], playable[1][2]
+end
+
 -- ========== START NEW GAME (internal) ==========
 local function startNewGame(triggerId)
     safeRandomSeed(triggerId)
-    upsertLocalLoreBook(triggerId, "curse_event_active", "", {key="curse_active", alwaysActive=false})
-    local deck = shuffle(createDeck())
+    CurseEvent_reset(triggerId)
+    local deck = CardEngine_shuffle(CardEngine_createDeck())
     local ph, ah = {}, {}
     for i = 1, 7 do
         ph[#ph+1] = table.remove(deck, 1)
@@ -568,10 +769,9 @@ local function startNewGame(triggerId)
     setChatVar(triggerId, "cv_uno_call",      "0")
     setChatVar(triggerId, "cv_choose_color",  "0")
     setChatVar(triggerId, "cv_last_action",   "game_start")
-    setChatVar(triggerId, "cv_draw_curse",    "")
-    setChatVar(triggerId, "cv_curse_attempts","0")
     setChatVar(triggerId, "cv_uno_pending",   "0")
     setChatVar(triggerId, "cv_discard_pile",  "")
+    log(triggerId, "[startGame] 덱 생성: 108장, 플레이어 7장, AI 7장, 첫 카드: " .. top)
     saveUI(triggerId)
     savePanel(triggerId)
 end
@@ -590,12 +790,12 @@ local function checkWin(triggerId, who, hand)
         setChatVar(triggerId, "cv_wins_ai", tostring(wa))
         setChatVar(triggerId, "cv_message", "😭 졌다... (" .. wp .. "승 : " .. wa .. "승)")
     end
-    local prevUI    = getChatVar(triggerId, "cv_game_html") or ""
-    local isMatchEnd = (wp >= 2 or wa >= 2)
+    local prevUI     = getChatVar(triggerId, "cv_game_html") or ""
+    local isMatchEnd = HouseRule_checkMatchWin(wp, wa)
     if isMatchEnd then
         setChatVar(triggerId, "cv_phase",       "match_end")
-        setChatVar(triggerId, "cv_winner",      wp >= 2 and "player" or "ai")
-        setChatVar(triggerId, "cv_last_action", wp >= 2 and "match_win_player" or "match_win_ai")
+        setChatVar(triggerId, "cv_winner",      wp >= MATCH_WIN_THRESHOLD and "player" or "ai")
+        setChatVar(triggerId, "cv_last_action", wp >= MATCH_WIN_THRESHOLD and "match_win_player" or "match_win_ai")
     else
         local gn = tonumber(getChatVar(triggerId, "cv_game_num") or "1") + 1
         setChatVar(triggerId, "cv_game_num",      tostring(gn))
@@ -603,6 +803,8 @@ local function checkWin(triggerId, who, hand)
         setChatVar(triggerId, "cv_last_action",   who == "player" and "round_win_player" or "round_win_ai")
         setChatVar(triggerId, "cv_phase",         "between_games")
     end
+    log(triggerId, "[checkWin] who=" .. who .. ", wp=" .. wp .. ", wa=" .. wa
+        .. ", matchEnd=" .. tostring(isMatchEnd))
     -- Build result overlay
     local titleCls, titleTxt, subTxt, iconHTML
     if isMatchEnd then
@@ -654,33 +856,42 @@ end
 
 -- ========== AI TURN ==========
 local function processAI(triggerId)
-    local maxTurns = 8
-    local won      = false
-    local ah  = d(nvl(getChatVar(triggerId, "cv_ai_hand"),        ""))
-    local top = nvl(getChatVar(triggerId, "cv_top_card"),         "")
-    local cur = nvl(getChatVar(triggerId, "cv_current_color"),    "red")
+    local maxTurns    = 8
+    local won         = false
+    local ah          = d(nvl(getChatVar(triggerId, "cv_ai_hand"),       ""))
+    local top         = nvl(getChatVar(triggerId, "cv_top_card"),        "")
+    local cur         = nvl(getChatVar(triggerId, "cv_current_color"),   "red")
     local finalMsg    = ""
     local finalAction = "ai_play"
     local endTurn     = false
     if #ah == 0 then won = true end
+
+    log(triggerId, "[processAI] 시작: AI 패=" .. #ah .. "장, top=" .. top .. ", cur=" .. cur)
 
     for _ = 1, maxTurns do
         if won or getPhase(triggerId) ~= "playing" then break end
         if #ah == 0 then won = true; break end
         local ci, cc = aiPick(ah, top, cur)
         if not ci then
-            drawCards(triggerId, ah, 1, true)
+            CardEngine_drawCards(triggerId, ah, 1, true)
             finalMsg    = "미쿠가 카드를 뽑았습니다."
             finalAction = "ai_draw"
-            endTurn     = true; break
+            log(triggerId, "[processAI] 낼 카드 없음, 1장 드로우 → 패=" .. #ah .. "장")
+            endTurn = true; break
         end
         table.remove(ah, ci)
-        addToDiscard(triggerId, top)
+        CardEngine_addToDiscard(triggerId, top)
         top = cc
-        local c, v     = parseCard(cc)
-        local msg      = "미쿠: " .. cardName(cc) .. " 사용!"
-        local action   = "ai_play"
+        local c, v      = parseCard(cc)
+        local msg       = "미쿠: " .. cardName(cc) .. " 사용!"
+        local action    = "ai_play"
         local loopAgain = false
+
+        -- HouseRule 체크
+        local skipEffect  = HouseRule_isSkipEffect(cc)
+        local drawPenalty = HouseRule_getDrawPenalty(cc)
+        log(triggerId, "[HouseRule] AI card=" .. cc .. ", skip=" .. tostring(skipEffect) .. ", draw=" .. drawPenalty)
+
         if c == "any" then
             -- Choose best color for AI
             local cnt = {red=0,yellow=0,green=0,blue=0}
@@ -694,7 +905,7 @@ local function processAI(triggerId)
             msg = msg .. " → " .. colorKr(best)
             if v == "wild4" then
                 local p = d(getChatVar(triggerId, "cv_player_hand") or "")
-                drawCards(triggerId, p, 4, false)
+                CardEngine_drawCards(triggerId, p, 4, false)
                 setChatVar(triggerId, "cv_player_hand", s(p))
                 msg = msg .. " 플레이어 +4!"; action = "ai_wild4"
             else
@@ -702,46 +913,45 @@ local function processAI(triggerId)
             end
         else
             cur = c
-            if v == "draw2" then
+            if drawPenalty == 2 then
                 local p = d(getChatVar(triggerId, "cv_player_hand") or "")
-                drawCards(triggerId, p, 2, false)
+                CardEngine_drawCards(triggerId, p, 2, false)
                 setChatVar(triggerId, "cv_player_hand", s(p))
                 msg = msg .. " 플레이어 +2!"; action = "ai_draw2"
-            elseif v == "skip" then
-                action = "ai_skip";    msg = msg .. " 플레이어 스킵!"; loopAgain = true
-            elseif v == "reverse" then
-                action = "ai_reverse"; msg = msg .. " (리버스=스킵)";  loopAgain = true
+            elseif skipEffect then
+                if v == "skip"    then action = "ai_skip";    msg = msg .. " 플레이어 스킵!" end
+                if v == "reverse" then action = "ai_reverse"; msg = msg .. " (리버스=스킵)"  end
+                loopAgain = true
             end
         end
-        -- UNO check & 1% special event trigger
+
+        -- CurseEvent 체크: AI UNO 도달 시
         if #ah == 1 then
             msg = msg .. " UNO!"; action = "ai_uno"
-            local curseCount = tonumber(getChatVar(triggerId, "cv_curse_attempts") or "0") or 0
-            curseCount = curseCount + 1
-            setChatVar(triggerId, "cv_curse_attempts", tostring(curseCount))
-            local existingCurse = getChatVar(triggerId, "cv_draw_curse") or ""
-            local roll = math.random(1, 100)
-            if curseCount >= 3 and roll == 1 and existingCurse ~= "ready" then
-                -- 1% event: replace top card with green number, give player all-draw-cards hand
-                local gn = {"green_1","green_2","green_3","green_5","green_6","green_7","green_9"}
-                top = gn[math.random(#gn)]; cur = "green"
-                setChatVar(triggerId, "cv_player_hand", CURSE_HAND)
-                setChatVar(triggerId, "cv_draw_curse", "ready")
+            log(triggerId, "[CurseEvent] AI UNO 도달! 체크 시작")
+            CurseEvent_onAiUno(triggerId)
+            -- 스크립트 방식 발동 시: cv_top_card / cv_current_color가 변경됨 → 로컬 변수 동기화
+            local curse = getChatVar(triggerId, "cv_draw_curse") or ""
+            if curse == "ready" then
+                top = nvl(getChatVar(triggerId, "cv_top_card"),       top)
+                cur = nvl(getChatVar(triggerId, "cv_current_color"),  "green")
                 loopAgain = false
             end
         end
+
+        log(triggerId, "[processAI] picked=" .. cc .. ", 남은 패=" .. #ah .. "장")
         finalMsg = msg; finalAction = action
         if #ah == 0 then won = true; break end
         if not loopAgain then endTurn = true; break end
     end
 
     if not endTurn and not won then endTurn = true end
-    setChatVar(triggerId, "cv_ai_hand",        s(ah))
-    setChatVar(triggerId, "cv_ai_count",       tostring(#ah))
-    setChatVar(triggerId, "cv_top_card",       top)
-    setChatVar(triggerId, "cv_current_color",  cur)
-    setChatVar(triggerId, "cv_message",        finalMsg)
-    setChatVar(triggerId, "cv_last_action",    finalAction)
+    setChatVar(triggerId, "cv_ai_hand",       s(ah))
+    setChatVar(triggerId, "cv_ai_count",      tostring(#ah))
+    setChatVar(triggerId, "cv_top_card",      top)
+    setChatVar(triggerId, "cv_current_color", cur)
+    setChatVar(triggerId, "cv_message",       finalMsg)
+    setChatVar(triggerId, "cv_last_action",   finalAction)
     if endTurn then
         setChatVar(triggerId, "cv_turn",     "player")
         setChatVar(triggerId, "cv_uno_call", "0")
@@ -752,16 +962,19 @@ local function processAI(triggerId)
         saveUI(triggerId)
     end
     if won then
+        log(triggerId, "[processAI] AI 승리!")
         checkWin(triggerId, "ai", ah)
     else
         savePanel(triggerId); saveStatus(triggerId)
     end
+    flushLog(triggerId)
     reloadDisplay(triggerId)
 end
 
 -- ========== PUBLIC GAME FUNCTIONS ==========
 
 function startGame(triggerId)
+    _logBuffer = {}  -- 이전 로그 버퍼 초기화
     local phase = getPhase(triggerId)
     if phase == "match_end" then
         setChatVar(triggerId, "cv_wins_player", "0")
@@ -778,21 +991,26 @@ function startGame(triggerId)
     -- game message, so {UNO_GAME} renders in the wrong place and game buttons vanish.
     local nextMsgIdx = tostring(getChatLength(triggerId) or 0)
     setChatVar(triggerId, "cv_game_msg_idx", nextMsgIdx)
+    log(triggerId, "[startGame] 게임 메시지 인덱스=" .. nextMsgIdx)
+    flushLog(triggerId)
     addChat(triggerId, "char", "{STATUS_BAR}\n{UNO_GAME}\n{SIDE_PANEL}")
     reloadDisplay(triggerId)
 end
 
 function onStart(triggerId)
+    _logBuffer = {}
     savePanel(triggerId); saveStatus(triggerId)
     local phase = getPhase(triggerId)
-    upsertLocalLoreBook(triggerId, "curse_event_active", "", {key="curse_active", alwaysActive=false})
+    CurseEvent_reset(triggerId)
     -- Recovery: if stuck in ai-turn or color-selection mode, reset to player turn
     if phase == "playing" then
         local turn   = getChatVar(triggerId, "cv_turn")          or "player"
         local choose = getChatVar(triggerId, "cv_choose_color")  or "0"
         if turn == "ai" or choose == "1" then
-            setChatVar(triggerId, "cv_turn",          "player")
-            setChatVar(triggerId, "cv_choose_color",  "0")
+            log(triggerId, "[onStart] 복구: turn=" .. turn .. ", choose=" .. choose .. " → player 턴으로 리셋")
+            setChatVar(triggerId, "cv_turn",         "player")
+            setChatVar(triggerId, "cv_choose_color", "0")
+            flushLog(triggerId)
             saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId)
             reloadDisplay(triggerId)
         end
@@ -809,6 +1027,11 @@ function onInput(triggerId)
 end
 
 function playCard(triggerId, idx)
+    _logBuffer = {}
+    -- 로어북 방식 커스 대기 체크 (게임 액션 시작 시)
+    CurseEvent_checkLorebookPending(triggerId)
+
+    -- Guard clauses
     if getPhase(triggerId) ~= "playing" then return end
     local turn = nvl(getChatVar(triggerId, "cv_turn"), "player")
     if turn ~= "player" then return end
@@ -819,39 +1042,52 @@ function playCard(triggerId, idx)
         setChatVar(triggerId, "cv_message", "UNO 미선언 패널티를 먼저 처리하세요!")
         saveUI(triggerId); reloadDisplay(triggerId); return
     end
+
+    log(triggerId, "[1/6] playCard 시작: idx=" .. tostring(idx))
+
+    -- [1단계] 카드 유효성 검사
     local ph   = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
     local card = ph[idx]
     if not card then return end
     local top = nvl(getChatVar(triggerId, "cv_top_card"),      "")
     local cur = nvl(getChatVar(triggerId, "cv_current_color"), "red")
-    if not canPlay(card, top, cur) then
+    log(triggerId, "[2/6] 카드 유효성: card=" .. card .. ", top=" .. top
+        .. ", canPlay=" .. tostring(CardEngine_canPlay(card, top, cur)))
+
+    if not CardEngine_canPlay(card, top, cur) then
         setChatVar(triggerId, "cv_message", "그 카드는 낼 수 없어요!")
         saveUI(triggerId); reloadDisplay(triggerId); return
     end
+
     local unoCall = nvl(getChatVar(triggerId, "cv_uno_call"), "0")
     table.remove(ph, idx)
     setChatVar(triggerId, "cv_player_hand", s(ph))
-    addToDiscard(triggerId, top)
-    setChatVar(triggerId, "cv_top_card",    card)
+    CardEngine_addToDiscard(triggerId, top)
+    setChatVar(triggerId, "cv_top_card", card)
     local c, v   = parseCard(card)
     local msg    = "나: " .. cardName(card) .. " 사용!"
     local action = "player_play"
     local skipAI = false
-    -- 1% special event: playing green_8 when curse is "ready"
+
+    -- [2단계] HouseRule 체크
+    local skipEffect  = HouseRule_isSkipEffect(card)
+    local drawPenalty = (c == "any") and 0 or HouseRule_getDrawPenalty(card)
+    log(triggerId, "[3/6] HouseRule: skip=" .. tostring(skipEffect) .. ", draw=" .. drawPenalty)
+
+    -- [3단계] CurseEvent 체크 (완전 독립)
+    log(triggerId, "[4/6] CurseEvent 체크: card=" .. card)
     if card == "green_8" then
-        local curse = getChatVar(triggerId, "cv_draw_curse") or ""
-        if curse == "ready" then
-            setChatVar(triggerId, "cv_draw_curse", "end")
-            action = "curse_green8"
-            upsertLocalLoreBook(triggerId, "curse_event_active", CURSE_LORE,
-                {key="curse_active", alwaysActive=true})
-        end
+        CurseEvent_onGreen8Played(triggerId)
+        local curseNow = getChatVar(triggerId, "cv_draw_curse") or ""
+        if curseNow == "end" then action = "curse_green8" end
     end
+
+    -- 와일드 카드 처리 (색상 선택 흐름)
     if c == "any" then
         setChatVar(triggerId, "cv_current_color", cur)
         if v == "wild4" then
             local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
-            drawCards(triggerId, ah, 4, true)
+            CardEngine_drawCards(triggerId, ah, 4, true)
             msg = msg .. " 미쿠 +4!"
             if action ~= "curse_green8" then action = "player_wild4" end
         else
@@ -859,44 +1095,59 @@ function playCard(triggerId, idx)
         end
         setChatVar(triggerId, "cv_message",     msg)
         setChatVar(triggerId, "cv_last_action", action)
-        if #ph == 1 and unoCall == "0" then setChatVar(triggerId, "cv_uno_pending", "1") end
+        -- [4단계] UNO 체크
+        log(triggerId, "[5/6] UNO 체크: #ph=" .. #ph .. ", unoCall=" .. unoCall)
+        if HouseRule_checkUnoRequired(#ph, unoCall) then
+            setChatVar(triggerId, "cv_uno_pending", "1")
+        end
         setChatVar(triggerId, "cv_uno_call", "0")
-        -- Bug A fix: update cv_game_html to reflect the current hand (empty after last
-        -- card removal) BEFORE checkWin injects the overlay.  Without this call,
-        -- checkWin uses a stale cv_game_html that still contains risu-btn="play-1"
-        -- elements; after a display-timing gap the player can click that stale button
-        -- a second time, but now phase=="between_games" so playCard returns immediately
-        -- ("does nothing").  With saveUI() here, the stale HTML has 0 cards / no
-        -- play-buttons, so no phantom click can reach a dead code-path.
         saveUI(triggerId)
-        if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
+        -- [5단계] 승리 체크 (Bug A fix: saveUI before checkWin)
+        log(triggerId, "[6/6] 승리 체크: who=player, #ph=" .. #ph)
+        if checkWin(triggerId, "player", ph) then flushLog(triggerId); reloadDisplay(triggerId); return end
         setChatVar(triggerId, "cv_choose_color", "1")
         setChatVar(triggerId, "cv_turn",         "player")
+        flushLog(triggerId)
         saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)
         return
     else
         setChatVar(triggerId, "cv_current_color", c)
-        if v == "skip" then
-            if action ~= "curse_green8" then action = "player_skip" end
-            msg = msg .. " 미쿠 스킵!"; skipAI = true
-        elseif v == "reverse" then
-            if action ~= "curse_green8" then action = "player_reverse" end
-            msg = msg .. " (리버스=스킵)"; skipAI = true
-        elseif v == "draw2" then
+        if skipEffect then
+            skipAI = true
+            if v == "skip" then
+                if action ~= "curse_green8" then action = "player_skip" end
+                msg = msg .. " 미쿠 스킵!"
+            else  -- reverse
+                if action ~= "curse_green8" then action = "player_reverse" end
+                msg = msg .. " (리버스=스킵)"
+            end
+        elseif drawPenalty == 2 then
             local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
-            drawCards(triggerId, ah, 2, true)
+            CardEngine_drawCards(triggerId, ah, 2, true)
             msg = msg .. " 미쿠 +2!"
             if action ~= "curse_green8" then action = "player_draw2" end
         end
     end
+
     setChatVar(triggerId, "cv_message",     msg)
     setChatVar(triggerId, "cv_last_action", action)
-    if #ph == 1 and unoCall == "0" then setChatVar(triggerId, "cv_uno_pending", "1") end
+
+    -- [4단계] UNO 체크
+    log(triggerId, "[5/6] UNO 체크: #ph=" .. #ph .. ", unoCall=" .. unoCall)
+    if HouseRule_checkUnoRequired(#ph, unoCall) then
+        setChatVar(triggerId, "cv_uno_pending", "1")
+    end
     setChatVar(triggerId, "cv_uno_call", "0")
-    saveUI(triggerId)   -- same Bug A fix: reflect current hand before win-overlay
-    if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
+
+    saveUI(triggerId)  -- Bug A fix: reflect current hand before win-overlay
+
+    -- [5단계] 승리 체크
+    log(triggerId, "[6/6] 승리 체크: who=player, #ph=" .. #ph)
+    if checkWin(triggerId, "player", ph) then flushLog(triggerId); reloadDisplay(triggerId); return end
+
     if skipAI then
         setChatVar(triggerId, "cv_turn", "player")
+        flushLog(triggerId)
         saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)
     else
         setChatVar(triggerId, "cv_turn", "ai")
@@ -905,6 +1156,10 @@ function playCard(triggerId, idx)
 end
 
 function drawCard(triggerId)
+    _logBuffer = {}
+    -- 로어북 방식 커스 대기 체크
+    CurseEvent_checkLorebookPending(triggerId)
+
     if getPhase(triggerId) ~= "playing" then return end
     local turn = nvl(getChatVar(triggerId, "cv_turn"), "player")
     if turn ~= "player" then return end
@@ -916,7 +1171,8 @@ function drawCard(triggerId)
         saveUI(triggerId); reloadDisplay(triggerId); return
     end
     local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
-    drawCards(triggerId, ph, 1, false)
+    log(triggerId, "[drawCard] 플레이어 드로우, 현재 패=" .. #ph .. "장")
+    CardEngine_drawCards(triggerId, ph, 1, false)
     setChatVar(triggerId, "cv_player_hand", s(ph))
     setChatVar(triggerId, "cv_message",     "카드를 1장 뽑았습니다.")
     setChatVar(triggerId, "cv_last_action", "player_draw")
@@ -927,8 +1183,10 @@ end
 
 function callUno(triggerId)
     if getPhase(triggerId) ~= "playing" then return end
+    log(triggerId, "[callUno] 플레이어 UNO 선언")
     setChatVar(triggerId, "cv_uno_call",    "1")
     setChatVar(triggerId, "cv_last_action", "player_uno")
+    flushLog(triggerId)
     saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId)
     reloadDisplay(triggerId)
 end
@@ -937,13 +1195,14 @@ function chooseColor(triggerId, color)
     if getPhase(triggerId) ~= "playing" then return end
     local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
     if choose ~= "1" then return end
-    setChatVar(triggerId, "cv_current_color",  color)
-    setChatVar(triggerId, "cv_choose_color",   "0")
-    setChatVar(triggerId, "cv_last_action",    "color_chosen")
-    setChatVar(triggerId, "cv_message",        colorKr(color) .. " 선택!")
+    log(triggerId, "[chooseColor] 색상=" .. color)
+    setChatVar(triggerId, "cv_current_color", color)
+    setChatVar(triggerId, "cv_choose_color",  "0")
+    setChatVar(triggerId, "cv_last_action",   "color_chosen")
+    setChatVar(triggerId, "cv_message",       colorKr(color) .. " 선택!")
     local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
     saveUI(triggerId)   -- Bug A fix: same as playCard — keep cv_game_html current
-    if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
+    if checkWin(triggerId, "player", ph) then flushLog(triggerId); reloadDisplay(triggerId); return end
     setChatVar(triggerId, "cv_turn", "ai")
     saveUI(triggerId); processAI(triggerId)
 end
@@ -953,25 +1212,27 @@ function penaltyCall(triggerId)
     local unoPending = nvl(getChatVar(triggerId, "cv_uno_pending"), "0")
     if unoPending ~= "1" then return end
     local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
-    drawCards(triggerId, ph, 2, false)
+    log(triggerId, "[penaltyCall] UNO 미선언 패널티: 2장 드로우, 현재=" .. #ph .. "장")
+    CardEngine_drawCards(triggerId, ph, 2, false)
     setChatVar(triggerId, "cv_player_hand",  s(ph))
     setChatVar(triggerId, "cv_uno_pending",  "0")
     setChatVar(triggerId, "cv_message",      "UNO 미선언 패널티! 카드 2장 드로우")
     setChatVar(triggerId, "cv_last_action",  "penalty")
+    flushLog(triggerId)
     saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId)
     reloadDisplay(triggerId)
 end
 
 -- ========== BUTTON CLICK ROUTER ==========
 function onButtonClick(triggerId, btnValue)
-    if     btnValue == "uno-draw"    then drawCard(triggerId)
-    elseif btnValue == "uno-call"    then callUno(triggerId)
-    elseif btnValue == "penalty-call"then penaltyCall(triggerId)
-    elseif btnValue == "color-red"   then chooseColor(triggerId, "red")
-    elseif btnValue == "color-yellow"then chooseColor(triggerId, "yellow")
-    elseif btnValue == "color-green" then chooseColor(triggerId, "green")
-    elseif btnValue == "color-blue"  then chooseColor(triggerId, "blue")
-    elseif btnValue == "game-start"  then startGame(triggerId)
+    if     btnValue == "uno-draw"     then drawCard(triggerId)
+    elseif btnValue == "uno-call"     then callUno(triggerId)
+    elseif btnValue == "penalty-call" then penaltyCall(triggerId)
+    elseif btnValue == "color-red"    then chooseColor(triggerId, "red")
+    elseif btnValue == "color-yellow" then chooseColor(triggerId, "yellow")
+    elseif btnValue == "color-green"  then chooseColor(triggerId, "green")
+    elseif btnValue == "color-blue"   then chooseColor(triggerId, "blue")
+    elseif btnValue == "game-start"   then startGame(triggerId)
     else
         local idx = btnValue:match("^play%-(%d+)$")
         if idx then playCard(triggerId, tonumber(idx)) end

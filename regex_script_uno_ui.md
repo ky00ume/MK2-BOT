@@ -17,15 +17,21 @@
 - `addChat` + `reloadDisplay`로 UI 갱신
 - `backgroundHTML`에 CSS 정의
 
-### v4.0 — 모듈 분리 + 자가 진단 로그 + 로어북 이벤트 (현재) ✅
+### v4.0 — 모듈 분리 + 자가 진단 로그 + 로어북 이벤트 (이전)
 - **3-모듈 구조**: `CardEngine` / `HouseRule` / `CurseEvent` 계층 분리 (단일 파일 내 섹션 구분)
 - **자가 진단 로그**: `DEBUG_MODE` + `log()` / `flushLog()` 시스템 추가
 - **1% 이벤트 로어북 방식**: `CURSE_USE_LOREBOOK` 플래그로 로어북 방식 / 스크립트 방식 토글
 - **CBS 변수 그룹 분류**: A(덱) / B(손패) / C(게임 진행) / D(1% 이벤트) 4그룹
 
+### v5.0 — 완전 재구성: 이중 필터 + 상시 판정 로그 + tostring 강제 (현재) ✅
+- **BasicRule/HouseRule 완전 분리**: `BasicRule_canPlay` (순수 기본 규칙) + `HouseRule_apply` (하우스 룰) 이중 필터
+- **JudgeLog 상시 출력**: `JudgeLog_evaluate()` — `DEBUG_MODE` 무관, 카드 제출 시마다 UI 메시지 영역에 판정 로그 1줄 출력
+- **tostring() 강제**: `BasicRule_canPlay` 내 모든 비교 직전 `tostring()` 적용 → 숫자/문자열 혼동 원천 차단
+- **playCard 중복 제거**: wild/일반 분기에서 각각 수행하던 UNO 체크·승리 체크를 공통 후처리 블록 1개로 통합
+
 ---
 
-## 현재 아키텍처 (v4.0)
+## 현재 아키텍처 (v5.0)
 
 ```
 유저 입력 "/start"
@@ -54,12 +60,15 @@ onButtonClick(triggerId, btnValue) ← Lua 함수
     │
     ├── "play-N"      → playCard(triggerId, N)
     │       ├── CurseEvent_checkLorebookPending()  — 로어북 방식 대기 체크
-    │       ├── [1단계] CardEngine_canPlay() 유효성 검사
-    │       ├── [2단계] HouseRule 체크 (skip, draw 판정)
-    │       ├── [3단계] CurseEvent_onGreen8Played() (완전 독립)
-    │       ├── [4단계] HouseRule_checkUnoRequired() UNO 체크
-    │       ├── [5단계] checkWin() 승리 체크
-    │       └── → processAI() or saveUI()+reloadDisplay()
+    │       ├── ① JudgeLog_evaluate → BasicRule_canPlay (기본 규칙 판정)
+    │       │       └── tostring() 강제 후 비교 → logHTML + logText 반환
+    │       ├── ③ CurseEvent_onGreen8Played() (완전 독립; HouseRule 전에 실행 → curse_green8 플래그 선행 설정)
+    │       ├── ② HouseRule_apply (기본 규칙 통과 시만 호출; CurseEvent 결과 반영)
+    │       │       └── skip/reverse/draw2/wild4 효과 + houseLogHTML 반환
+    │       ├── cv_message ← 기본메시지 + judgeHTML + houseLogHTML (항상 기록)
+    │       ├── ④ HouseRule_checkUnoRequired() UNO 체크 (공통)
+    │       ├── ⑤ checkWin() 승리 체크 (공통)
+    │       └── → 색상선택(wild) / 턴유지(skip) / processAI() 중 택일
     │
     ├── "uno-draw"    → drawCard(triggerId)
     │       ├── CurseEvent_checkLorebookPending()
@@ -95,6 +104,18 @@ processAI(triggerId) — AI 턴 처리
 AI 요청 전처리 (customScripts - editrequest 타입)
     └── (<char>) 태그 뒤에 게임 상태 CBS 매크로 주입
 ```
+
+---
+
+## RISUAI 배치 경로
+
+| 구성 요소 | 리스 메뉴 위치 | 설명 |
+|-----------|--------------|------|
+| `uno_engine.lua` (전체 코드) | **캐릭터 카드 편집 → 고급 설정 → 트리거 스크립트** (`customScripts` 필드) | Lua 엔진 본체. `onButtonClick`, `onStart`, `onInput` 함수가 여기 등록됨 |
+| CBS 정규식 | **캐릭터 카드 편집 → 고급 설정 → 정규식 스크립트** | `{UNO_GAME}` → `cv_game_html`, `{STATUS_BAR}` → `cv_status_html` 등 |
+| 로어북 (CurseEvent용) | **캐릭터 카드 편집 → 로어북** | `curse_active`, `curse_trigger` 키로 자동 관리됨 |
+| CSS (카드/오버레이 스타일) | **캐릭터 카드 편집 → 고급 설정 → backgroundHTML** | `.uno-status`, `.uno-result-overlay` 등 스타일 정의 |
+| 기본 변수 초기값 | **캐릭터 카드 편집 → 고급 설정 → defaultVariables** | `cv_phase`, `cv_top_card` 등 CBS 변수 초기값 |
 
 ---
 
@@ -217,28 +238,37 @@ cv_draw_curse == "ready" 상태에서
 
 ---
 
-## 디버그 모드 사용법 (v4.0)
+## 디버그 모드 사용법 (v5.0)
 
 ### 활성화/비활성화
 ```lua
 -- uno_engine.lua 상단에서 설정
-local DEBUG_MODE        = true  -- false로 바꾸면 로그 전체 OFF
+local DEBUG_MODE        = true  -- false로 바꾸면 DEBUG 로그 전체 OFF
 local CURSE_USE_LOREBOOK = true -- 1% 이벤트 방식 선택
 ```
+
+> ⚠️ **v5.0 변경사항**: `JudgeLog_evaluate()` 판정 로그는 `DEBUG_MODE`에 **무관하게 항상** 게임 UI 메시지 영역(`cv_message`)에 출력됩니다.
 
 ### 로그 출력 형식
 `DEBUG_MODE = true`로 설정 시, 각 게임 액션 완료 후 채팅창에 다음 형태의 로그 블록이 추가됨:
 
 ```
-🔧 [HH:MM:SS] [1/6] playCard 시작: idx=3
-🔧 [HH:MM:SS] [2/6] 카드 유효성: card=red_5, top=blue_5, canPlay=true
-🔧 [HH:MM:SS] [3/6] HouseRule: skip=false, draw=0
-🔧 [HH:MM:SS] [4/6] CurseEvent 체크: card=red_5
-🔧 [HH:MM:SS] [5/6] UNO 체크: #ph=2, unoCall=0
-🔧 [HH:MM:SS] [6/6] 승리 체크: who=player, #ph=2
+🔧 [HH:MM:SS] [1/5] playCard 시작: idx=3
+🔧 [HH:MM:SS] [2/5] [판정] 바닥:(빨강 7) vs 내 패:(파랑 7) | 숫자 일치:True | 색상 일치:False | 최종:낼 수 있음
+🔧 [HH:MM:SS] [3/5] CurseEvent 체크: card=red_5
+🔧 [HH:MM:SS] [4/5] HouseRule_apply 호출
+🔧 [HH:MM:SS] [5/5] UNO 체크: #ph=2, unoCall=0
 🔧 [HH:MM:SS] [processAI] 시작: AI 패=7장, top=red_5, cur=red
 🔧 [HH:MM:SS] [HouseRule] AI card=blue_skip, skip=true, draw=0
 🔧 [HH:MM:SS] [processAI] picked=blue_skip, 남은 패=6장
+```
+
+### 판정 로그 UI 출력 예시 (항상 표시)
+게임 UI의 메시지 영역에 판정 로그가 1줄씩 표시됩니다:
+```
+나: 파랑 7 사용!
+[판정] 바닥:(빨강 7) vs 내 패:(파랑 7) | 숫자 일치:True | 색상 일치:False | 최종:낼 수 있음
+└─[하우스] Skip 효과 → 상대 턴 스킵
 ```
 
 ### 1% 이벤트 디버그 예시
@@ -259,7 +289,7 @@ local CURSE_USE_LOREBOOK = true -- 1% 이벤트 방식 선택
 | 파일 | 역할 |
 |------|------|
 | `MikuNiceTry_CharCard.json` | CharCard (customScripts, backgroundHTML, defaultVariables, triggerscript 포함) |
-| `uno_engine.lua` | triggerscript code와 동일한 코드의 가독성용 독립 파일 (v4.0) |
+| `uno_engine.lua` | triggerscript code와 동일한 코드의 가독성용 독립 파일 (v5.0) |
 | `regex_script_uno_ui.md` | 이 문서 |
 | `README.md` | 사용 방법 |
 | `HOUSE_RULES.md` | 하우스 룰 가이드 |

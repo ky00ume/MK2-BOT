@@ -330,12 +330,16 @@ local function saveBottomUI(triggerId)
         setChatVar(triggerId, "cv_bottom_ui", "")
         return
     end
-    -- match_end / between_games: keep status bar + restart button visible under RP messages
+    -- match_end / between_games: keep status bar + restart button visible under RP messages.
+    -- CBS 001_v008_BOTTOM_UI uses /([\\s\\S]*)/g which matches TWICE per message (full content
+    -- + a zero-width match at the end), so cv_bottom_ui is appended twice.  Wrap in a
+    -- deduplicated container: the CSS sibling rule hides the second copy (Bug C fix).
     local statusHtml = getChatVar(triggerId, "cv_status_html") or ""
     local label      = nvl(getChatVar(triggerId, "cv_panel_label"), "다시 하기")
     local sub        = nvl(getChatVar(triggerId, "cv_panel_sub"),   "벌칙 RP 후 누르세요")
     local panelHtml  = PANEL_BTN_PREFIX .. label .. PANEL_BTN_MID .. sub .. PANEL_BTN_SUFFIX
-    setChatVar(triggerId, "cv_bottom_ui", "\n" .. statusHtml .. "\n" .. panelHtml)
+    local dedup      = '<style>.uno-bui+.uno-bui{display:none!important}</style>'
+    setChatVar(triggerId, "cv_bottom_ui", dedup .. '<div class="uno-bui">' .. '\n' .. statusHtml .. '\n' .. panelHtml .. '</div>')
 end
 
 local function saveStatus(triggerId)
@@ -718,8 +722,11 @@ local function processAI(triggerId)
         setChatVar(triggerId, "cv_turn",     "player")
         setChatVar(triggerId, "cv_uno_call", "0")
     end
+    -- Bug B fix: check for AI win unconditionally, outside the phase guard below.
+    -- The in-block `if #ah==0` only ran when phase=="playing"; a stale-phase edge
+    -- case could skip it and leave `won=false` despite an empty hand.
+    if not won and #ah == 0 then won = true end
     if getPhase(triggerId) == "playing" then
-        if #ah == 0 then won = true end
         saveUI(triggerId)
     end
     if won then
@@ -742,13 +749,14 @@ function startGame(triggerId)
     setChatVar(triggerId, "cv_last_action", "game_start")
     startNewGame(triggerId)
     savePanel(triggerId); saveStatus(triggerId)
+    -- Bug A fix: set cv_game_msg_idx BEFORE addChat so that CBS 001_v001_UNO_GAME
+    -- immediately shows game HTML in the correct message.  Reading getChatLength()
+    -- AFTER addChat is race-prone: if the LLM generates a response before the read,
+    -- getChatLength returns N+2 and len-1 points at the LLM message instead of the
+    -- game message, so {UNO_GAME} renders in the wrong place and game buttons vanish.
+    local nextMsgIdx = tostring(getChatLength(triggerId) or 0)
+    setChatVar(triggerId, "cv_game_msg_idx", nextMsgIdx)
     addChat(triggerId, "char", "{STATUS_BAR}\n{UNO_GAME}\n{SIDE_PANEL}")
-    local len = getChatLength(triggerId)
-    if len and len > 0 then
-        setChatVar(triggerId, "cv_game_msg_idx", tostring(len - 1))
-    end
-    -- Re-save status after addChat so cv_bottom_ui is correctly set
-    saveStatus(triggerId)
     reloadDisplay(triggerId)
 end
 
@@ -825,6 +833,14 @@ function playCard(triggerId, idx)
         setChatVar(triggerId, "cv_last_action", action)
         if #ph == 1 and unoCall == "0" then setChatVar(triggerId, "cv_uno_pending", "1") end
         setChatVar(triggerId, "cv_uno_call", "0")
+        -- Bug A fix: update cv_game_html to reflect the current hand (empty after last
+        -- card removal) BEFORE checkWin injects the overlay.  Without this call,
+        -- checkWin uses a stale cv_game_html that still contains risu-btn="play-1"
+        -- elements; after a display-timing gap the player can click that stale button
+        -- a second time, but now phase=="between_games" so playCard returns immediately
+        -- ("does nothing").  With saveUI() here, the stale HTML has 0 cards / no
+        -- play-buttons, so no phantom click can reach a dead code-path.
+        saveUI(triggerId)
         if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
         setChatVar(triggerId, "cv_choose_color", "1")
         setChatVar(triggerId, "cv_turn",         "player")
@@ -849,6 +865,7 @@ function playCard(triggerId, idx)
     setChatVar(triggerId, "cv_last_action", action)
     if #ph == 1 and unoCall == "0" then setChatVar(triggerId, "cv_uno_pending", "1") end
     setChatVar(triggerId, "cv_uno_call", "0")
+    saveUI(triggerId)   -- same Bug A fix: reflect current hand before win-overlay
     if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
     if skipAI then
         setChatVar(triggerId, "cv_turn", "player")
@@ -892,6 +909,7 @@ function chooseColor(triggerId, color)
     setChatVar(triggerId, "cv_last_action",    "color_chosen")
     setChatVar(triggerId, "cv_message",        colorKr(color) .. " 선택!")
     local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
+    saveUI(triggerId)   -- Bug A fix: same as playCard — keep cv_game_html current
     if checkWin(triggerId, "player", ph) then reloadDisplay(triggerId); return end
     setChatVar(triggerId, "cv_turn", "ai")
     saveUI(triggerId); processAI(triggerId)

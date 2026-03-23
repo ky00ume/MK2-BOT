@@ -10,8 +10,8 @@ pcall(function() math.randomseed(os.time()) end)
 -- ============================================================
 -- DEBUG / LOG
 -- ============================================================
-local DEBUG_MODE        = true  -- false로 바꾸면 로그 전체 OFF
-local CURSE_USE_LOREBOOK = true -- true=로어북 방식(테스트용), false=스크립트 방식(math.random)
+local DEBUG_MODE        = false -- true로 바꾸면 게임 단계별 로그가 채팅창에 출력됨
+local CURSE_USE_LOREBOOK = true  -- true=로어북 방식(테스트용), false=스크립트 방식(math.random)
 
 local _logBuffer = {}
 
@@ -41,6 +41,10 @@ end
 local COLORS   = {"red","yellow","green","blue"}
 local SPECIALS = {"skip","reverse","draw2"}
 
+-- 하우스 룰 상수
+local MATCH_WIN_THRESHOLD  = 2  -- 3판 2선승: 이 승수에 도달하면 매치 종료
+local CURSE_MIN_ATTEMPTS   = 3  -- 미쿠 UNO 도달 N회 이상이어야 1% 이벤트 발동 자격
+
 -- 1% special event: hand given to player so that playing green_8 triggers the cascade
 local CURSE_HAND =
     "green_8,green_draw2,green_draw2,yellow_draw2,yellow_draw2,"
@@ -60,7 +64,7 @@ local CURSE_LORE =
 
 -- Lorebook content activated when lorebook-mode 1% trigger check is enabled
 local CURSE_TRIGGER_LORE =
-    "[시스템 노트] 미쿠가 3회 이상 UNO 상태에 도달했습니다.\n\n"
+    "[시스템 노트] 미쿠가 " .. CURSE_MIN_ATTEMPTS .. "회 이상 UNO 상태에 도달했습니다.\n\n"
     .. "다음 미쿠의 UNO 선언 시, 1% 확률로 특수 이벤트가 발동될 수 있습니다.\n"
     .. "이벤트 발동 여부는 AI가 응답을 생성할 때 결정됩니다.\n\n"
     .. "만약 이번이 특수 이벤트라면:\n"
@@ -223,9 +227,10 @@ local function HouseRule_checkRoundWin(hand)
     return #hand == 0
 end
 
--- 3판 2선승
+-- MATCH_WIN_THRESHOLD 승 이상이면 매치 종료
 local function HouseRule_checkMatchWin(wp, wa)
-    return (tonumber(wp) or 0) >= 2 or (tonumber(wa) or 0) >= 2
+    return (tonumber(wp) or 0) >= MATCH_WIN_THRESHOLD
+        or (tonumber(wa) or 0) >= MATCH_WIN_THRESHOLD
 end
 
 -- ============================================================
@@ -266,8 +271,8 @@ local function CurseEvent_onAiUno(triggerId)
     local modeStr = CURSE_USE_LOREBOOK and "lorebook" or "script"
     log(triggerId, "[CurseEvent] onAiUno: attempts=" .. count .. ", mode=" .. modeStr)
 
-    if count < 3 then
-        log(triggerId, "[CurseEvent] 조건 미달 (" .. count .. "/3회)")
+    if count < CURSE_MIN_ATTEMPTS then
+        log(triggerId, "[CurseEvent] 조건 미달 (" .. count .. "/" .. CURSE_MIN_ATTEMPTS .. "회)")
         return
     end
 
@@ -789,8 +794,8 @@ local function checkWin(triggerId, who, hand)
     local isMatchEnd = HouseRule_checkMatchWin(wp, wa)
     if isMatchEnd then
         setChatVar(triggerId, "cv_phase",       "match_end")
-        setChatVar(triggerId, "cv_winner",      wp >= 2 and "player" or "ai")
-        setChatVar(triggerId, "cv_last_action", wp >= 2 and "match_win_player" or "match_win_ai")
+        setChatVar(triggerId, "cv_winner",      wp >= MATCH_WIN_THRESHOLD and "player" or "ai")
+        setChatVar(triggerId, "cv_last_action", wp >= MATCH_WIN_THRESHOLD and "match_win_player" or "match_win_ai")
     else
         local gn = tonumber(getChatVar(triggerId, "cv_game_num") or "1") + 1
         setChatVar(triggerId, "cv_game_num",      tostring(gn))

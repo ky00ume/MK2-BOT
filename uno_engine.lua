@@ -1,10 +1,13 @@
 -- ================================================
--- UNO GAME ENGINE v5.0 for RISUAI - Hatsune Miku CharCard
+-- UNO GAME ENGINE v5.1 for RISUAI - Hatsune Miku CharCard
 -- Architecture: setChatVar/getChatVar + customScripts CBS
 -- Module Structure: CardEngine / BasicRule / HouseRule / CurseEvent
 -- Card notation: color_value (e.g. red_5, blue_skip, any_wild4)
 -- v5.0 changes: BasicRule/HouseRule split, JudgeLog always-on,
 --               tostring() enforcement, unified UNO+win post-proc
+-- v5.1 changes: normalize() helper (lower+trim) for all color/value
+--               comparisons; win-first check in playCard; CurseEvent
+--               functions paused with do return end for stabilization
 -- ================================================
 
 pcall(function() math.randomseed(os.time()) end)
@@ -99,9 +102,14 @@ end
 -- ★ 이 함수들은 cv_draw_curse를 절대 건드리지 않는다
 -- ============================================================
 
+-- 색상/값 문자열 강제 규격화 (소문자 + 앞뒤 공백 제거)
+local function normalize(str)
+    return tostring(str):lower():match("^%s*(.-)%s*$")
+end
+
 local function CardEngine_parseCard(card)
     local c, v = card:match("^([^_]+)_(.+)$")
-    return c or "any", v or card
+    return normalize(c or "any"), normalize(v or card)
 end
 
 -- Backward-compatible alias used internally
@@ -131,9 +139,9 @@ end
 local function BasicRule_canPlay(card, top, cur)
     local cc, cv = parseCard(card)
     local tc, tv = parseCard(top)
-    cc = tostring(cc); cv = tostring(cv)
-    tc = tostring(tc); tv = tostring(tv)
-    local ac = tostring(cur ~= "" and cur or tc)
+    cc = normalize(cc); cv = normalize(cv)
+    tc = normalize(tc); tv = normalize(tv)
+    local ac = normalize(cur ~= "" and cur or tc)
     if cc == "any" then return true,  {wild=true} end
     if cc == ac    then return true,  {colorMatch=true} end
     if cv == tv    then return true,  {valueMatch=true} end
@@ -152,8 +160,8 @@ local canPlay = CardEngine_canPlay
 -- returns: pass(bool), logHTML(string), logText(string)
 local function JudgeLog_evaluate(card, top, cur)
     local pass, info = BasicRule_canPlay(card, top, cur)
-    local cc, cv = parseCard(card); cc = tostring(cc); cv = tostring(cv)
-    local tc, tv = parseCard(top);  tc = tostring(tc); tv = tostring(tv)
+    local cc, cv = parseCard(card); cc = normalize(cc); cv = normalize(cv)
+    local tc, tv = parseCard(top);  tc = normalize(tc); tv = normalize(tv)
     local vm = {skip="스킵",reverse="리버스",draw2="+2",wild="와일드",wild4="+4 와일드"}
     local topDisp  = "(" .. colorKr(tc) .. " " .. (vm[tv] or tv) .. ")"
     local cardDisp = (cc == "any")
@@ -349,6 +357,7 @@ end
 -- CURSE_USE_LOREBOOK=false: 3회 이상이면 math.random 주사위 (스크립트 방식)
 -- 스크립트 방식에서 발동 시: cv_top_card, cv_current_color, cv_player_hand, cv_draw_curse 설정
 local function CurseEvent_onAiUno(triggerId)
+    do return end -- [v5.1] 1% 이벤트 일시 정지: 기초 안정화 후 해제
     local curse = getChatVar(triggerId, "cv_draw_curse") or ""
     if curse ~= "" then
         log(triggerId, "[CurseEvent] onAiUno: 이미 발동 중 (" .. curse .. "), 무시")
@@ -393,6 +402,7 @@ end
 -- editdisplay CBS가 cv_curse_activate_pending="1"을 설정한다.
 -- 다음 게임 액션 시작 시 이 함수를 호출해 실제 저주를 적용한다.
 local function CurseEvent_checkLorebookPending(triggerId)
+    do return end -- [v5.1] 1% 이벤트 일시 정지: 기초 안정화 후 해제
     if not CURSE_USE_LOREBOOK then return end
     local pending = getChatVar(triggerId, "cv_curse_activate_pending") or ""
     if pending ~= "1" then return end
@@ -415,6 +425,7 @@ end
 -- 플레이어가 green_8을 냈을 때 호출
 -- cv_draw_curse=="ready"일 때만 실제 이벤트 발동
 local function CurseEvent_onGreen8Played(triggerId)
+    do return end -- [v5.1] 1% 이벤트 일시 정지: 기초 안정화 후 해제
     local curse = getChatVar(triggerId, "cv_draw_curse") or ""
     log(triggerId, "[CurseEvent] onGreen8Played: curse=" .. curse)
     if curse ~= "ready" then return end
@@ -1161,6 +1172,17 @@ function playCard(triggerId, idx)
     local action = "player_play"
     local isWild = (c == "any")
 
+    -- 승리 우선 판정: 손패가 0이면 즉시 게임 종료, 턴 넘기기/색상 선택 건너뜀
+    if #ph == 0 then
+        setChatVar(triggerId, "cv_current_color", isWild and normalize(cur) or c)
+        setChatVar(triggerId, "cv_message",     "나: " .. cardName(card) .. " 사용!")
+        setChatVar(triggerId, "cv_last_action", "player_play")
+        saveUI(triggerId)
+        checkWin(triggerId, "player", ph)
+        flushLog(triggerId); reloadDisplay(triggerId)
+        return
+    end
+
     -- ③ CurseEvent 체크 (완전 독립, HouseRule_apply 전에 실행해야
     --    action="curse_green8" 플래그가 HouseRule_apply 진입 시 유효함)
     log(triggerId, "[3/5] CurseEvent 체크: card=" .. card)
@@ -1257,6 +1279,7 @@ function chooseColor(triggerId, color)
     if getPhase(triggerId) ~= "playing" then return end
     local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
     if choose ~= "1" then return end
+    color = normalize(color)
     log(triggerId, "[chooseColor] 색상=" .. color)
     setChatVar(triggerId, "cv_current_color", color)
     setChatVar(triggerId, "cv_choose_color",  "0")

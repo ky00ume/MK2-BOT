@@ -1,8 +1,10 @@
 -- ================================================
--- UNO GAME ENGINE v4.0 for RISUAI - Hatsune Miku CharCard
+-- UNO GAME ENGINE v5.0 for RISUAI - Hatsune Miku CharCard
 -- Architecture: setChatVar/getChatVar + customScripts CBS
--- Module Structure: CardEngine / HouseRule / CurseEvent
+-- Module Structure: CardEngine / BasicRule / HouseRule / CurseEvent
 -- Card notation: color_value (e.g. red_5, blue_skip, any_wild4)
+-- v5.0 changes: BasicRule/HouseRule split, JudgeLog always-on,
+--               tostring() enforcement, unified UNO+win post-proc
 -- ================================================
 
 pcall(function() math.randomseed(os.time()) end)
@@ -116,18 +118,62 @@ local function cardName(card)
     return colorKr(c) .. " " .. (vm[v] or v)
 end
 
-local function CardEngine_canPlay(card, top, cur)
+-- ============================================================
+-- LAYER 1 추가 (v5.0): BasicRule + JudgeLog
+-- BasicRule_canPlay  — 순수 UNO 기본 규칙 + tostring() 강제
+-- JudgeLog_evaluate  — 항상 동작하는 판정 로그 (DEBUG_MODE 무관)
+-- ★ HouseRule_apply는 LAYER 2 말미에 위치 (HouseRule_* 함수 뒤)
+-- ============================================================
+
+-- BasicRule_canPlay: 순수 UNO 기본 규칙만 (색상 OR 숫자/기호 OR 와일드)
+-- tostring() 강제로 숫자/문자열 혼동 원천 차단
+-- returns: pass(bool), info({wild|colorMatch|valueMatch})
+local function BasicRule_canPlay(card, top, cur)
     local cc, cv = parseCard(card)
     local tc, tv = parseCard(top)
-    local ac = cur ~= "" and cur or tc
-    if cc == "any" then return true end
-    if cc == ac    then return true end
-    if cv == tv    then return true end
-    return false
+    cc = tostring(cc); cv = tostring(cv)
+    tc = tostring(tc); tv = tostring(tv)
+    local ac = tostring(cur ~= "" and cur or tc)
+    if cc == "any" then return true,  {wild=true} end
+    if cc == ac    then return true,  {colorMatch=true} end
+    if cv == tv    then return true,  {valueMatch=true} end
+    return false, {}
+end
+
+-- CardEngine_canPlay: v4.0 backward-compat wrapper (bool only)
+local function CardEngine_canPlay(card, top, cur)
+    return (BasicRule_canPlay(card, top, cur))
 end
 
 -- Backward-compatible alias
 local canPlay = CardEngine_canPlay
+
+-- JudgeLog_evaluate: 판정 + 로그 HTML 생성 (항상 동작, DEBUG_MODE 무관)
+-- returns: pass(bool), logHTML(string), logText(string)
+local function JudgeLog_evaluate(card, top, cur)
+    local pass, info = BasicRule_canPlay(card, top, cur)
+    local cc, cv = parseCard(card); cc = tostring(cc); cv = tostring(cv)
+    local tc, tv = parseCard(top);  tc = tostring(tc); tv = tostring(tv)
+    local vm = {skip="스킵",reverse="리버스",draw2="+2",wild="와일드",wild4="+4 와일드"}
+    local topDisp  = "(" .. colorKr(tc) .. " " .. (vm[tv] or tv) .. ")"
+    local cardDisp = (cc == "any")
+        and "(와일드)"
+        or ("(" .. colorKr(cc) .. " " .. (vm[cv] or cv) .. ")")
+    local result = pass and "낼 수 있음" or "낼 수 없음"
+    local logText
+    if info and info.wild then
+        logText = "[판정] 바닥:" .. topDisp .. " vs 내 패:" .. cardDisp
+               .. " | 와일드:True | 최종:" .. result
+    else
+        logText = "[판정] 바닥:" .. topDisp .. " vs 내 패:" .. cardDisp
+               .. " | 숫자 일치:" .. (info and info.valueMatch and "True" or "False")
+               .. " | 색상 일치:" .. (info and info.colorMatch and "True" or "False")
+               .. " | 최종:" .. result
+    end
+    local logHTML = '<div style="font-size:0.72rem;color:#8af;font-family:monospace;margin-top:2px;">'
+                 .. logText .. '</div>'
+    return pass, logHTML, logText
+end
 
 local function CardEngine_createDeck()
     local deck = {}
@@ -231,6 +277,51 @@ end
 local function HouseRule_checkMatchWin(wp, wa)
     return (tonumber(wp) or 0) >= MATCH_WIN_THRESHOLD
         or (tonumber(wa) or 0) >= MATCH_WIN_THRESHOLD
+end
+
+-- HouseRule_apply: 기본 규칙 통과 후에만 호출. skip/reverse/draw2/wild4 효과 적용.
+-- ph: 플레이어 손패(table), ah: AI 손패(table, 필요 시 내부에서 갱신)
+-- returns: action(string), msgSuffix(string), skipAI(bool), houseLogHTML(string)
+local function HouseRule_apply(triggerId, card, ph, ah, baseAction)
+    local c, v        = parseCard(card)
+    local skipEffect  = HouseRule_isSkipEffect(card)
+    local drawPenalty = HouseRule_getDrawPenalty(card)
+    local action       = baseAction or "player_play"
+    local msgSuffix    = ""
+    local skipAI       = false
+    local houseLogHTML = ""
+    local houseStyle   = 'style="font-size:0.68rem;color:#fa8;font-family:monospace;margin-left:8px;"'
+
+    if c == "any" then
+        if v == "wild4" then
+            CardEngine_drawCards(triggerId, ah, 4, true)
+            msgSuffix = " 미쿠 +4!"
+            if action ~= "curse_green8" then action = "player_wild4" end
+            houseLogHTML = '<div ' .. houseStyle .. '>└─[하우스] Wild+4 → 미쿠 +4</div>'
+        else
+            if action ~= "curse_green8" then action = "player_wild" end
+        end
+    else
+        if skipEffect then
+            skipAI = true
+            if v == "skip" then
+                if action ~= "curse_green8" then action = "player_skip" end
+                msgSuffix = " 미쿠 스킵!"
+                houseLogHTML = '<div ' .. houseStyle .. '>└─[하우스] Skip 효과 → 상대 턴 스킵</div>'
+            else
+                if action ~= "curse_green8" then action = "player_reverse" end
+                msgSuffix = " (리버스=스킵)"
+                houseLogHTML = '<div ' .. houseStyle .. '>└─[하우스] Reverse 효과 → 상대 턴 스킵</div>'
+            end
+        elseif drawPenalty == 2 then
+            CardEngine_drawCards(triggerId, ah, 2, true)
+            msgSuffix = " 미쿠 +2!"
+            if action ~= "curse_green8" then action = "player_draw2" end
+            houseLogHTML = '<div ' .. houseStyle .. '>└─[하우스] Draw2 패널티 → 미쿠 +2</div>'
+        end
+    end
+
+    return action, msgSuffix, skipAI, houseLogHTML
 end
 
 -- ============================================================
@@ -1043,19 +1134,21 @@ function playCard(triggerId, idx)
         saveUI(triggerId); reloadDisplay(triggerId); return
     end
 
-    log(triggerId, "[1/6] playCard 시작: idx=" .. tostring(idx))
+    log(triggerId, "[1/5] playCard 시작: idx=" .. tostring(idx))
 
-    -- [1단계] 카드 유효성 검사
+    -- ① JudgeLog_evaluate → BasicRule_canPlay (기본 규칙 판정, tostring 강제)
+    -- [2/5] 판정 결과가 log()에 출력됨 (JudgeLog는 항상 동작, DEBUG_MODE 무관)
     local ph   = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
     local card = ph[idx]
     if not card then return end
     local top = nvl(getChatVar(triggerId, "cv_top_card"),      "")
     local cur = nvl(getChatVar(triggerId, "cv_current_color"), "red")
-    log(triggerId, "[2/6] 카드 유효성: card=" .. card .. ", top=" .. top
-        .. ", canPlay=" .. tostring(CardEngine_canPlay(card, top, cur)))
 
-    if not CardEngine_canPlay(card, top, cur) then
-        setChatVar(triggerId, "cv_message", "그 카드는 낼 수 없어요!")
+    local pass, judgeHTML, judgeText = JudgeLog_evaluate(card, top, cur)
+    log(triggerId, "[2/5] " .. judgeText)
+
+    if not pass then
+        setChatVar(triggerId, "cv_message", "그 카드는 낼 수 없어요!" .. judgeHTML)
         saveUI(triggerId); reloadDisplay(triggerId); return
     end
 
@@ -1065,75 +1158,39 @@ function playCard(triggerId, idx)
     CardEngine_addToDiscard(triggerId, top)
     setChatVar(triggerId, "cv_top_card", card)
     local c, v   = parseCard(card)
-    local msg    = "나: " .. cardName(card) .. " 사용!"
     local action = "player_play"
-    local skipAI = false
+    local isWild = (c == "any")
 
-    -- [2단계] HouseRule 체크
-    local skipEffect  = HouseRule_isSkipEffect(card)
-    local drawPenalty = (c == "any") and 0 or HouseRule_getDrawPenalty(card)
-    log(triggerId, "[3/6] HouseRule: skip=" .. tostring(skipEffect) .. ", draw=" .. drawPenalty)
-
-    -- [3단계] CurseEvent 체크 (완전 독립)
-    log(triggerId, "[4/6] CurseEvent 체크: card=" .. card)
+    -- ③ CurseEvent 체크 (완전 독립, HouseRule_apply 전에 실행해야
+    --    action="curse_green8" 플래그가 HouseRule_apply 진입 시 유효함)
+    log(triggerId, "[3/5] CurseEvent 체크: card=" .. card)
     if card == "green_8" then
         CurseEvent_onGreen8Played(triggerId)
         local curseNow = getChatVar(triggerId, "cv_draw_curse") or ""
         if curseNow == "end" then action = "curse_green8" end
     end
 
-    -- 와일드 카드 처리 (색상 선택 흐름)
-    if c == "any" then
+    -- ② HouseRule_apply (기본 규칙 통과 후에만 호출;
+    --    실행 순서: ③CurseEvent → ②HouseRule_apply, curse_green8 플래그 반영)
+    log(triggerId, "[4/5] HouseRule_apply 호출")
+    local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
+    local houseAction, msgSuffix, skipAI, houseLogHTML =
+        HouseRule_apply(triggerId, card, ph, ah, action)
+    action = houseAction
+
+    -- 색상 처리
+    if isWild then
         setChatVar(triggerId, "cv_current_color", cur)
-        if v == "wild4" then
-            local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
-            CardEngine_drawCards(triggerId, ah, 4, true)
-            msg = msg .. " 미쿠 +4!"
-            if action ~= "curse_green8" then action = "player_wild4" end
-        else
-            if action ~= "curse_green8" then action = "player_wild" end
-        end
-        setChatVar(triggerId, "cv_message",     msg)
-        setChatVar(triggerId, "cv_last_action", action)
-        -- [4단계] UNO 체크
-        log(triggerId, "[5/6] UNO 체크: #ph=" .. #ph .. ", unoCall=" .. unoCall)
-        if HouseRule_checkUnoRequired(#ph, unoCall) then
-            setChatVar(triggerId, "cv_uno_pending", "1")
-        end
-        setChatVar(triggerId, "cv_uno_call", "0")
-        saveUI(triggerId)
-        -- [5단계] 승리 체크 (Bug A fix: saveUI before checkWin)
-        log(triggerId, "[6/6] 승리 체크: who=player, #ph=" .. #ph)
-        if checkWin(triggerId, "player", ph) then flushLog(triggerId); reloadDisplay(triggerId); return end
-        setChatVar(triggerId, "cv_choose_color", "1")
-        setChatVar(triggerId, "cv_turn",         "player")
-        flushLog(triggerId)
-        saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)
-        return
     else
         setChatVar(triggerId, "cv_current_color", c)
-        if skipEffect then
-            skipAI = true
-            if v == "skip" then
-                if action ~= "curse_green8" then action = "player_skip" end
-                msg = msg .. " 미쿠 스킵!"
-            else  -- reverse
-                if action ~= "curse_green8" then action = "player_reverse" end
-                msg = msg .. " (리버스=스킵)"
-            end
-        elseif drawPenalty == 2 then
-            local ah = d(getChatVar(triggerId, "cv_ai_hand") or "")
-            CardEngine_drawCards(triggerId, ah, 2, true)
-            msg = msg .. " 미쿠 +2!"
-            if action ~= "curse_green8" then action = "player_draw2" end
-        end
     end
 
+    local msg = "나: " .. cardName(card) .. " 사용!" .. msgSuffix .. judgeHTML .. houseLogHTML
     setChatVar(triggerId, "cv_message",     msg)
     setChatVar(triggerId, "cv_last_action", action)
 
-    -- [4단계] UNO 체크
-    log(triggerId, "[5/6] UNO 체크: #ph=" .. #ph .. ", unoCall=" .. unoCall)
+    -- ④ UNO 체크 (공통 통합)
+    log(triggerId, "[5/5] UNO 체크: #ph=" .. #ph .. ", unoCall=" .. unoCall)
     if HouseRule_checkUnoRequired(#ph, unoCall) then
         setChatVar(triggerId, "cv_uno_pending", "1")
     end
@@ -1141,11 +1198,16 @@ function playCard(triggerId, idx)
 
     saveUI(triggerId)  -- Bug A fix: reflect current hand before win-overlay
 
-    -- [5단계] 승리 체크
-    log(triggerId, "[6/6] 승리 체크: who=player, #ph=" .. #ph)
+    -- ⑤ 승리 체크 (공통 통합)
     if checkWin(triggerId, "player", ph) then flushLog(triggerId); reloadDisplay(triggerId); return end
 
-    if skipAI then
+    -- 턴 처리
+    if isWild then
+        setChatVar(triggerId, "cv_choose_color", "1")
+        setChatVar(triggerId, "cv_turn",         "player")
+        flushLog(triggerId)
+        saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)
+    elseif skipAI then
         setChatVar(triggerId, "cv_turn", "player")
         flushLog(triggerId)
         saveUI(triggerId); savePanel(triggerId); saveStatus(triggerId); reloadDisplay(triggerId)

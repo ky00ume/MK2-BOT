@@ -1,5 +1,5 @@
 -- ================================================
--- UNO GAME ENGINE v5.1 for RISUAI - Hatsune Miku CharCard
+-- UNO GAME ENGINE v5.2 for RISUAI - Hatsune Miku CharCard
 -- Architecture: setChatVar/getChatVar + customScripts CBS
 -- Module Structure: CardEngine / BasicRule / HouseRule / CurseEvent
 -- Card notation: color_value (e.g. red_5, blue_skip, any_wild4)
@@ -8,6 +8,8 @@
 -- v5.1 changes: normalize() helper (lower+trim) for all color/value
 --               comparisons; win-first check in playCard; CurseEvent
 --               functions paused with do return end for stabilization
+-- v5.2 changes: normalize() now strips ALL whitespace (gsub) instead of
+--               trim-only; chooseColor dead-code win-check removed
 -- ================================================
 
 pcall(function() math.randomseed(os.time()) end)
@@ -102,9 +104,9 @@ end
 -- ★ 이 함수들은 cv_draw_curse를 절대 건드리지 않는다
 -- ============================================================
 
--- 색상/값 문자열 강제 규격화 (소문자 + 앞뒤 공백 제거)
+-- 색상/값 문자열 강제 규격화 (소문자 + 모든 공백 제거)
 local function normalize(str)
-    return tostring(str):lower():match("^%s*(.-)%s*$")
+    return tostring(str):lower():gsub("%s", "")
 end
 
 local function CardEngine_parseCard(card)
@@ -1285,9 +1287,8 @@ function chooseColor(triggerId, color)
     setChatVar(triggerId, "cv_choose_color",  "0")
     setChatVar(triggerId, "cv_last_action",   "color_chosen")
     setChatVar(triggerId, "cv_message",       colorKr(color) .. " 선택!")
-    local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
-    saveUI(triggerId)   -- Bug A fix: same as playCard — keep cv_game_html current
-    if checkWin(triggerId, "player", ph) then flushLog(triggerId); reloadDisplay(triggerId); return end
+    -- playCard()에서 #ph==0이면 이미 checkWin+return 처리됨
+    -- chooseColor에 도달했다면 #ph>0 보장 → 바로 AI턴
     setChatVar(triggerId, "cv_turn", "ai")
     saveUI(triggerId); processAI(triggerId)
 end

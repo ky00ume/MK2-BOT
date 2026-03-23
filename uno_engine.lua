@@ -165,12 +165,26 @@ local function shuffle(deck)
     return deck
 end
 
+-- Adds `card` to the discard pile so it can be recycled when the draw pile runs out.
+local function addToDiscard(triggerId, card)
+    if not card or card == "" then return end
+    local dp = d(getChatVar(triggerId, "cv_discard_pile") or "")
+    dp[#dp+1] = card
+    setChatVar(triggerId, "cv_discard_pile", s(dp))
+end
+
 -- Draw `count` cards into `hand`. Updates pile in CV. If isAI, also updates cv_ai_hand/cv_ai_count.
+-- When the draw pile is empty, recycle the shuffled discard pile instead of creating a new 108-card deck.
 local function drawCards(triggerId, hand, count, isAI)
     local pile = d(getChatVar(triggerId, "cv_draw_pile") or "")
     if #pile == 0 then
-        local newDeck = shuffle(createDeck())
-        for i = 1, #newDeck do pile[#pile+1] = newDeck[i] end
+        local dp = d(getChatVar(triggerId, "cv_discard_pile") or "")
+        if #dp > 0 then
+            pile = shuffle(dp)
+            setChatVar(triggerId, "cv_discard_pile", "")
+        else
+            pile = shuffle(createDeck())
+        end
         setChatVar(triggerId, "cv_draw_pile", s(pile))
     end
     for i = 1, count do
@@ -324,22 +338,17 @@ local function saveBottomUI(triggerId)
     local phase = getPhase(triggerId)
     if phase == "playing" then
         -- During active play the game UI is rendered exclusively via the {UNO_GAME}
-        -- placeholder on the game message (CBS 001_v001_UNO_GAME).  Injecting the
-        -- same HTML into cv_bottom_ui would create a second copy with identical
-        -- risu-btn identifiers, causing RisuAI to misroute button clicks (Bug A/B).
+        -- placeholder on the game message (CBS 001_v001_UNO_GAME).
         setChatVar(triggerId, "cv_bottom_ui", "")
         return
     end
-    -- match_end / between_games: keep status bar + restart button visible under RP messages.
-    -- CBS 001_v008_BOTTOM_UI uses /([\\s\\S]*)/g which matches TWICE per message (full content
-    -- + a zero-width match at the end), so cv_bottom_ui is appended twice.  Wrap in a
-    -- deduplicated container: the CSS sibling rule hides the second copy (Bug C fix).
+    -- match_end / between_games: show status bar + restart button under RP messages.
+    -- CBS 001_v008_BOTTOM_UI uses ([\\s\\S]+) with no flags so it matches exactly once.
     local statusHtml = getChatVar(triggerId, "cv_status_html") or ""
     local label      = nvl(getChatVar(triggerId, "cv_panel_label"), "다시 하기")
     local sub        = nvl(getChatVar(triggerId, "cv_panel_sub"),   "벌칙 RP 후 누르세요")
     local panelHtml  = PANEL_BTN_PREFIX .. label .. PANEL_BTN_MID .. sub .. PANEL_BTN_SUFFIX
-    local dedup      = '<style>.uno-bui+.uno-bui{display:none!important}</style>'
-    setChatVar(triggerId, "cv_bottom_ui", dedup .. '<div class="uno-bui">' .. '\n' .. statusHtml .. '\n' .. panelHtml .. '</div>')
+    setChatVar(triggerId, "cv_bottom_ui", statusHtml .. '\n' .. panelHtml)
 end
 
 local function saveStatus(triggerId)
@@ -398,18 +407,31 @@ local function buildUI(triggerId)
     aiHTML = aiHTML .. '</div>'
 
     -- Player's hand (face-up, playable cards glow)
-    local isChoosing   = choose == "1"
-    local isPlayerTurn = turn == "player"
+    local isChoosing      = choose == "1"
+    local isPlayerTurn    = turn == "player"
+    local isPenaltyPending = unoPending == "1" and isPlayerTurn
     local phHTML = '<div style="display:flex;flex-wrap:wrap;gap:1px;justify-content:center;">'
     for i, card in ipairs(ph) do
-        phHTML = phHTML .. cardHTML(card, i, isPlayerTurn and not isChoosing and canPlay(card, top, cur), false)
+        phHTML = phHTML .. cardHTML(card, i, isPlayerTurn and not isChoosing and not isPenaltyPending and canPlay(card, top, cur), false)
     end
     phHTML = phHTML .. '</div>'
 
     -- Action buttons
-    local drawBtn = (isPlayerTurn and not isChoosing)
-        and '<button style="padding:7px 16px;background:#3a7bd5;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;" risu-btn="uno-draw">카드 뽑기</button>'
-        or ''
+    local drawBtn = ""
+    if isPlayerTurn and not isChoosing and not isPenaltyPending then
+        if unoCall == "1" then
+            -- After calling UNO the player must play a card; only show draw if nothing is playable
+            local hasPlayable = false
+            for _, card in ipairs(ph) do
+                if canPlay(card, top, cur) then hasPlayable = true; break end
+            end
+            if not hasPlayable then
+                drawBtn = '<button style="padding:7px 16px;background:#3a7bd5;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;" risu-btn="uno-draw">카드 뽑기</button>'
+            end
+        else
+            drawBtn = '<button style="padding:7px 16px;background:#3a7bd5;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;" risu-btn="uno-draw">카드 뽑기</button>'
+        end
+    end
 
     local unoBtn = ""
     if #ph == 2 and unoCall == "0" and isPlayerTurn and not isChoosing then
@@ -549,6 +571,7 @@ local function startNewGame(triggerId)
     setChatVar(triggerId, "cv_draw_curse",    "")
     setChatVar(triggerId, "cv_curse_attempts","0")
     setChatVar(triggerId, "cv_uno_pending",   "0")
+    setChatVar(triggerId, "cv_discard_pile",  "")
     saveUI(triggerId)
     savePanel(triggerId)
 end
@@ -652,6 +675,7 @@ local function processAI(triggerId)
             endTurn     = true; break
         end
         table.remove(ah, ci)
+        addToDiscard(triggerId, top)
         top = cc
         local c, v     = parseCard(cc)
         local msg      = "미쿠: " .. cardName(cc) .. " 사용!"
@@ -722,10 +746,8 @@ local function processAI(triggerId)
         setChatVar(triggerId, "cv_turn",     "player")
         setChatVar(triggerId, "cv_uno_call", "0")
     end
-    -- Bug B fix: check for AI win unconditionally, outside the phase guard below.
-    -- The in-block `if #ah==0` only ran when phase=="playing"; a stale-phase edge
-    -- case could skip it and leave `won=false` despite an empty hand.
     if not won and #ah == 0 then won = true end
+    if won then setChatVar(triggerId, "cv_turn", "player") end
     if getPhase(triggerId) == "playing" then
         saveUI(triggerId)
     end
@@ -792,6 +814,11 @@ function playCard(triggerId, idx)
     if turn ~= "player" then return end
     local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
     if choose == "1" then return end
+    local unoPending = nvl(getChatVar(triggerId, "cv_uno_pending"), "0")
+    if unoPending == "1" then
+        setChatVar(triggerId, "cv_message", "UNO 미선언 패널티를 먼저 처리하세요!")
+        saveUI(triggerId); reloadDisplay(triggerId); return
+    end
     local ph   = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
     local card = ph[idx]
     if not card then return end
@@ -804,6 +831,7 @@ function playCard(triggerId, idx)
     local unoCall = nvl(getChatVar(triggerId, "cv_uno_call"), "0")
     table.remove(ph, idx)
     setChatVar(triggerId, "cv_player_hand", s(ph))
+    addToDiscard(triggerId, top)
     setChatVar(triggerId, "cv_top_card",    card)
     local c, v   = parseCard(card)
     local msg    = "나: " .. cardName(card) .. " 사용!"
@@ -882,6 +910,11 @@ function drawCard(triggerId)
     if turn ~= "player" then return end
     local choose = nvl(getChatVar(triggerId, "cv_choose_color"), "0")
     if choose == "1" then return end
+    local unoPending = nvl(getChatVar(triggerId, "cv_uno_pending"), "0")
+    if unoPending == "1" then
+        setChatVar(triggerId, "cv_message", "UNO 미선언 패널티를 먼저 처리하세요!")
+        saveUI(triggerId); reloadDisplay(triggerId); return
+    end
     local ph = d(nvl(getChatVar(triggerId, "cv_player_hand"), ""))
     drawCards(triggerId, ph, 1, false)
     setChatVar(triggerId, "cv_player_hand", s(ph))
